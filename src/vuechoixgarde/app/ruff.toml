@@ -1,0 +1,4 @@
+extend = "../../../pyproject.toml"
+
+[lint.flake8-tidy-imports]
+extend-banned-api = { "PySide6" = { msg = "Qt imports are forbidden in app (NFR-030)." } }

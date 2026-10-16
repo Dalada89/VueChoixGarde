@@ -1,0 +1,1 @@
+"""Coordinate application use cases."""
