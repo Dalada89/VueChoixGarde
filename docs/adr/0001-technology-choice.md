@@ -54,6 +54,7 @@ For FR-081, V1 uses a simplified approach: keys are **recognized** by physical p
 **Negative / accepted**
 
 - **Deviation from FR-081 and acceptance criterion 14:** on non-US layouts a slot key label can be wrong until the key has been pressed once. The action itself is correct. The SRS should be adjusted, or native label providers (Windows `ToUnicodeEx`, Linux `xkbcommon`, macOS `UCKeyTranslate`) implemented later; the stored data format does not need to change for that.
+  *Update 2026-10-16:* SRS v0.6 adopts this label behavior in FR-081 and acceptance criterion 14; it is no longer a deviation.
 - The scan code tables per platform are a risk and must be validated by a small keyboard prototype before the UI is built.
 - Release packages are relatively large (about 80–150 MB).
 - License obligations: PySide6/Qt and `libheif`/`libde265` are LGPLv3 (dynamic linking, license texts in releases). The HEVC patent situation must be assessed before the first public release.

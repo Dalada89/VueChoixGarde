@@ -1,9 +1,9 @@
 # Technical Design — VueChoixGarde
 
 **Document type:** Technical design (implementation concept)  
-**Version:** 0.1 (draft)  
+**Version:** 0.2 (draft)  
 **Date:** 2026-10-16  
-**Based on:** [Product Requirements (SRS) v0.5](requirements.md)  
+**Based on:** [Product Requirements (SRS) v0.6](requirements.md)  
 **Decision record:** [ADR 0001 — Technology choice](adr/0001-technology-choice.md)
 
 ## 1. Purpose and scope
@@ -43,6 +43,7 @@ Main reasons: HEIC/HEIF support on all platforms is valued higher than a perfect
 | Language / runtime | CPython 3.13 for development and releases; `requires-python >= 3.12` | 3.12 is the minimum because of `Path.is_junction()` (NFR-002) |
 | Package and project manager | **uv** | `pyproject.toml`, `uv.lock` (committed), `.python-version`; dev tools in `[dependency-groups]` |
 | Linter and formatter | **ruff** (`ruff check`, `ruff format`) | Configuration in `pyproject.toml`, see Section 11.2 |
+| Static type checker | **pyright** (mode `standard`) | Development tool only, see Section 11.4 |
 | GUI toolkit | PySide6 (Qt 6, Qt Widgets) | Widgets, not QML: simpler, fully keyboard-driven, easy to test with pytest-qt |
 | Image decoding | Pillow | JPEG, PNG, GIF, BMP, TIFF, WebP; EXIF orientation via `ImageOps.exif_transpose` |
 | HEIC/HEIF | `pi-heif` (decoder-only variant of `pillow-heif`) | Registered as a Pillow plugin; no encoder bundled, see Section 8.6 |
@@ -277,7 +278,7 @@ V1 does not query the operating system's keyboard layout. Instead the label of a
 3. In the settings dialog, a slot key is assigned by pressing it (“press the new key”); this records the position and its label at the same time.
 4. Dead keys or positions without a printable character keep the last known label.
 
-Consequence: before a key has been pressed once on a non-US layout, its label can be wrong, while the *action* is already correct, because recognition is position-based. The user can always reassign keys in the settings. This is a deliberate deviation from FR-081 and acceptance criterion 14 (Section 13). An exact label can be added later without changing stored data, by implementing a `KeyLabelProvider` per platform (Windows `ToUnicodeEx`, Linux `xkbcommon`, macOS `UCKeyTranslate`).
+Consequence: before a key has been pressed once on a non-US layout, its label can be wrong, while the *action* is already correct, because recognition is position-based. The user can always reassign keys in the settings. This is the behavior specified in FR-081 (SRS v0.6); the help view explains it (FR-086). An exact label from the first start can be added later without changing stored data, by implementing a `KeyLabelProvider` per platform (Windows `ToUnicodeEx`, Linux `xkbcommon`, macOS `UCKeyTranslate`).
 
 ### 8.2 Name comparison and Unicode (FR-033, FR-036, FR-047, NFR-041)
 
@@ -375,8 +376,8 @@ UI strings live in simple JSON catalogs (`i18n/de.json`, `en.json`, `fr.json`) w
 ### 11.1 uv
 
 - `uv sync` creates the virtual environment from `pyproject.toml` and `uv.lock`.
-- Runtime dependencies in `[project.dependencies]`; development tools (pytest, pytest-qt, ruff, pyinstaller) in `[dependency-groups] dev`.
-- All commands run through uv: `uv run vuechoixgarde`, `uv run pytest`, `uv run ruff check`, `uv run ruff format`.
+- Runtime dependencies in `[project.dependencies]`; development tools (pytest, pytest-qt, ruff, pyright, pyinstaller) in `[dependency-groups] dev`.
+- All commands run through uv: `uv run vuechoixgarde`, `uv run pytest`, `uv run ruff check`, `uv run ruff format`, `uv run pyright`.
 - `uv.lock` is committed; CI uses `uv sync --locked` so builds are reproducible.
 - The Python version is pinned in `.python-version` and installed by uv if missing.
 
@@ -388,7 +389,7 @@ UI strings live in simple JSON catalogs (`i18n/de.json`, `en.json`, `fr.json`) w
   - no network modules anywhere (`socket`, `urllib`, `http`, `ssl`, `PySide6.QtNetwork`, …) (NFR-005),
   - no `PySide6` imports in `core`, `ports`, `app`, `fsops`, `store`, `imaging`, `applog` (NFR-030, via per-file configuration).
 - Target version `py312`, line length 100.
-- Static type checking (e.g. mypy or pyright) is not decided yet (Section 15).
+- Static type checking is done with pyright (Section 11.4).
 
 ### 11.3 Tests (SRS Section 8)
 
@@ -401,11 +402,20 @@ UI strings live in simple JSON catalogs (`i18n/de.json`, `en.json`, `fr.json`) w
 
 Test images are generated with Pillow at test time (including EXIF with GPS and orientation tags) or bundled under `tests/data` with a documented license; personal images are never used.
 
+### 11.4 pyright
+
+- **pyright** in mode `standard` is the static type checker; mypy was considered but is slower and less precise with the PySide6 type stubs.
+- Installed as a development dependency from PyPI (`pyright[nodejs]`, so no system-wide Node.js is required). It is a development tool only and is never part of a release build.
+- Configuration in `[tool.pyright]` in `pyproject.toml`: `typeCheckingMode = "standard"`, `pythonVersion = "3.12"`, checked paths `src` and `tests`, the virtual environment created by uv.
+- `core`, `ports` and `app` are fully annotated; the `Protocol` interfaces in `ports` are what makes the adapters (`fsops`, `store`, `imaging`, `applog`) and the test doubles interchangeable (NFR-030), so type checking protects these boundaries.
+- Stricter checks (e.g. mode `strict` for `core`) can be enabled later per directory without changing the code structure.
+- `uv run pyright` runs in CI and must pass (Section 12.1).
+
 ## 12. Build and release (NFR-044)
 
 ### 12.1 CI
 
-GitHub Actions matrix on Linux, Windows and macOS: `uv sync --locked`, `ruff format --check`, `ruff check`, `pytest` (Qt offscreen). Releases are built from tags.
+GitHub Actions matrix on Linux, Windows and macOS: `uv sync --locked`, `ruff format --check`, `ruff check`, `pyright`, `pytest` (Qt offscreen). Releases are built from tags.
 
 ### 12.2 Packaging
 
@@ -438,7 +448,7 @@ Determined by the Qt/PySide6 version used and documented with each release. Expe
 
 | Item | Decision | Status |
 |---|---|---|
-| FR-081 / acceptance criterion 14: label shows the character of the active layout | Recognition is position-based from the start; the label is learned on first key press and initially shows the US-QWERTY character (Section 8.1) | Accepted by the product owner; SRS should be adjusted (e.g. note as known limitation) or exact labels implemented later |
+| FR-081 / acceptance criterion 14: label shows the character of the active layout | Recognition is position-based from the start; the label is learned on first key press and initially shows the US-QWERTY character (Section 8.1) | Accepted by the product owner; SRS FR-081 and acceptance criterion 14 adjusted in v0.6. Exact labels from the first start (native label providers) remain a possible later enhancement |
 | FR-071 adopting existing identical files (COULD) | Not in V1 | Deferred |
 | FR-004 HEIC/HEIF | Supported on all release platforms via `pi-heif`; unsupported platforms show the required error | Goes beyond the SRS minimum |
 | FR-046 temporary files “identified by the copy register” | Identification via the operation journal, which is part of the application data next to the register | Interpretation |
@@ -458,7 +468,5 @@ Determined by the Qt/PySide6 version used and documented with each release. Expe
 
 ## 15. Open points
 
-- Choose a static type checker (mypy or pyright) or decide against one.
 - Project license for the repository (must be compatible with LGPL components).
-- Update SRS FR-081 / acceptance criterion 14 to reflect the accepted label behavior.
 - Confirm the macOS Intel build target.

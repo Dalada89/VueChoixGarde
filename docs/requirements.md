@@ -1,7 +1,7 @@
 # Product Requirements — VueChoixGarde
 
 **Document type:** Software Requirements Specification (SRS)  
-**Version:** 0.5 (draft for Version 1 of the product)  
+**Version:** 0.6 (draft for Version 1 of the product)  
 **Product:** VueChoixGarde — a local desktop application for quickly reviewing images and sorting them into destination folders  
 **Target platforms:** Linux, Windows and macOS  
 
@@ -165,7 +165,7 @@ Each destination is represented by a slot with its own key. Pressing a slot key 
 
 ### 5.5 Settings and Application Data
 
-- **FR-060 — Global settings (MUST):** The following MUST be stored as global settings and persist across restarts: user interface language, sound on/off, sort direction, reopen last folder (FR-010), global slot template.
+- **FR-060 — Global settings (MUST):** The following MUST be stored as global settings and persist across restarts: user interface language, sound on/off, sort direction, reopen last folder (FR-010), global slot template, learned slot key labels (FR-081).
 - **FR-061 — Profiles and copy register (MUST):** Destination profiles and the copy register MUST persist across restarts. They MUST be stored only in the application data, never in the source or destination folders.
 - **FR-062 — First start (MUST):** If no application data exists, the application MUST create it with default values without asking.
 - **FR-063 — Damaged application data (MUST):** If application data exists but cannot be read, the application MUST NOT overwrite or delete it. It MUST report the problem and offer to continue with default values; the damaged data MUST then be kept under a different name. As long as the copy register is unavailable, no toggle off MUST be possible (all same-name destination files are treated as conflict files).
@@ -184,7 +184,12 @@ Each destination is represented by a slot with its own key. Pressing a slot key 
 ### 5.7 Keyboard
 
 - **FR-080 — Keyboard-only operation (MUST):** Navigation, slot actions, refresh and help MUST be usable without a mouse while the main window has focus.
-- **FR-081 — Physical key positions (MUST):** Slot keys MUST be stored and recognized by physical key position. The interface MUST display the character that the active keyboard layout produces for that position (e.g. `Z Q S D` on AZERTY for the default slots).
+- **FR-081 — Physical key positions and labels (MUST):** Slot keys MUST be stored and recognized by physical key position, so that the action is correct on every keyboard layout from the start. The label of a slot key is determined as follows:
+  - Initially, the label MUST show the character of that position on a US-QWERTY keyboard (e.g. `W A S D` for the default slots).
+  - As soon as the key is pressed without modifiers and produces a printable character, the label MUST show that character from then on (e.g. `Z Q S D` on AZERTY after each default slot key has been pressed once). Learned labels persist across restarts (FR-060).
+  - Assigning a slot key in the settings by pressing it MUST record its position and its label at the same time.
+
+  Known limitation: on layouts other than US-QWERTY, a label can differ from the character on the key until that key has been pressed once. This MUST be explained in the help view (FR-086) and the documentation (NFR-032).
 - **FR-082 — Allowed slot keys (MUST):** A slot key MUST be a single key of the main character block (letters, digits, punctuation) pressed without any modifier. Key presses with Shift, Ctrl, Alt, AltGr, Cmd/Win or similar modifiers MUST NOT trigger a slot. The following keys are reserved and cannot be slot keys: arrow keys, `F1`–`F12`, `Esc`, `Enter`, `Tab`, `Space`, `Backspace`, `Delete` and modifier keys.
 - **FR-083 — Fixed application keys (MUST):** `→` next image, `←` previous image, `F1` help and shortcut overview, `F5` refresh image list, `Esc` close dialog/overlay.
 - **FR-084 — Text input and dialogs (MUST):** While a text field has focus or a dialog is open, slot keys and navigation keys MUST NOT trigger their actions in the main view.
@@ -271,7 +276,7 @@ V1 is accepted when all of the following pass on Linux, Windows and macOS:
 11. An interrupted copy leaves no partial files (FR-046).
 12. Holding a slot key toggles exactly once; activations during a running operation are ignored (FR-051).
 13. Selection status is restored after restart; externally deleted copies are recognized as not selected (FR-050, FR-061, FR-070).
-14. Default slot keys are at the physical positions of `W A S D` and are labeled according to the active layout; slot keys with modifiers do not trigger (FR-031, FR-081, FR-082).
+14. Default slot keys are at the physical positions of `W A S D` and trigger the correct slot on QWERTY, QWERTZ and AZERTY layouts; labels initially show `W A S D` and, after a key has been pressed once, show the character the active layout produces for it, also after a restart; slot keys with modifiers do not trigger (FR-031, FR-081, FR-082).
 15. A new source folder receives the global slot template; another folder's profile is never applied automatically (FR-040, FR-041).
 16. The sound plays only after a successful toggle on and can be switched off (FR-057).
 17. Language can be switched between German, English and French; `F1` shows all shortcuts (FR-085, FR-086).
@@ -299,3 +304,4 @@ There are currently no open decisions.
 | 0.3 | 2026-10-15 | Clarified source-file protection, byte-identical copying, embedded metadata preservation, per-source-folder profiles, per-destination status and non-destructive metadata reconciliation. |
 | 0.4 | 2026-10-16 | Replaced copy-only behavior with a per-slot toggle: first activation copies the image and matching sidecars; second activation removes only verified managed copies. |
 | 0.5 | 2026-10-16 | HEIC/HEIF always listed; on platforms without decoding support an error is shown instead of the image (FR-004); slot actions stay available for undisplayable images (FR-023). Review results incorporated: glossary with managed/verified/modified copies, copy register and sidecar rules; navigation corrected (→ next, ← previous); permanent deletion on toggle off, confirmation for modified copies; safe copy procedure; one operation at a time; case-insensitive destination names; symbolic links pointing outside rejected; EXIF orientation; maximum of 12 slots; global slot template; physical key positions, unmodified slot keys; HEIC/HEIF platform-dependent and not a release criterion; RAW files and Live Photo videos are not copied as companion files; UI languages DE/EN/FR; help and shortcut overview; JSONL logging; dark design; GitHub distribution; decided items removed; restructured to remove redundancies and technology-specific statements. |
+| 0.6 | 2026-10-16 | Slot key labels (FR-081): initially the US-QWERTY character, then the character learned from the first unmodified key press, persisted as a global setting (FR-060); known limitation documented. Acceptance criterion 14 adjusted accordingly. |
