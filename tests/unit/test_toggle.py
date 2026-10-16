@@ -39,6 +39,8 @@ def test_verified_sidecar_is_not_scheduled_for_copy() -> None:
         (FileClass.VERIFIED, (), TogglePlan(ToggleAction.CONFLICT)),
         (FileClass.ABSENT, (FileClass.VERIFIED,), TogglePlan(ToggleAction.CONFLICT)),
         (FileClass.ABSENT, (), TogglePlan(ToggleAction.TOGGLE_ON)),
+        (FileClass.MODIFIED, (), TogglePlan(ToggleAction.CONFLICT)),
+        (FileClass.ABSENT, (FileClass.MODIFIED,), TogglePlan(ToggleAction.CONFLICT)),
     ],
 )
 def test_missing_register_treats_every_present_file_as_foreign(

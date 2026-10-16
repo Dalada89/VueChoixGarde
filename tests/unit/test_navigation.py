@@ -53,3 +53,31 @@ def test_refresh_selects_the_nearest_following_image_when_current_was_removed(
     state = ImageNavigation((), current, descending)
     refreshed = refresh_navigation(state, filenames)
     assert refreshed.current == expected
+
+
+@pytest.mark.parametrize(
+    ("descending", "current", "filenames", "expected"),
+    [
+        (False, "IMG_9.jpg", ("IMG_1.jpg", "IMG_2.jpg"), "IMG_2.jpg"),
+        (True, "IMG_1.jpg", ("IMG_2.jpg", "IMG_9.jpg"), "IMG_2.jpg"),
+    ],
+)
+def test_refresh_falls_back_to_last_image_when_no_following_image_exists(
+    descending: bool, current: str, filenames: tuple[str, ...], expected: str
+) -> None:
+    state = ImageNavigation((), current, descending)
+    refreshed = refresh_navigation(state, filenames)
+    assert refreshed.current == expected
+
+
+def test_refresh_sets_current_to_none_for_an_empty_list() -> None:
+    state = create_navigation(["IMG_1.jpg"], current="IMG_1.jpg")
+    refreshed = refresh_navigation(state, [])
+    assert refreshed.current is None
+    assert refreshed.images == ()
+
+
+@pytest.mark.parametrize("direction", list(NavigationDirection))
+def test_navigation_on_an_empty_list_is_a_no_op(direction: NavigationDirection) -> None:
+    state = create_navigation([])
+    assert navigate(state, direction) == state
