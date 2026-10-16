@@ -1,6 +1,6 @@
 # Handoff – VueChoixGarde
 
-Status: Phase 2 (keyboard prototype) implemented and automatically verified; manual cross-platform validation remains pending.
+Status: Phase 3 (ports, fsops, store) implemented and verified; 259 tests passed and one Windows-only test was skipped on Linux. Phase 2 manual cross-platform keyboard validation remains pending. No Phase 3 commit was created. Next: Phase 4 (`app` use cases and orchestration).
 Zweck: Fortsetzung der Arbeit auf einem anderen Rechner bzw. in einer neuen Sitzung.
 
 ## 1. Ziel des Projekts
@@ -22,8 +22,9 @@ VueChoixGarde soll gemäß `docs/requirements.md` (SRS v0.6) als **lokal laufend
 |---|---|---|
 | `docs/requirements.md` | SRS v0.6 (FR-081/Abnahmekriterium 14 angepasst) | committet (`3059d81`) |
 | Projektgerüst + Paket `core` + Unit-Tests (Phase 1) | `pyproject.toml`, `uv.lock`, `src/vuechoixgarde/…`, `tests/unit/…` | committet (`b74c738`) |
+| Tastatur-Prototyp (Phase 2) | `core/native_keys.py`, `core/keys.py`, `ui/keyboard.py`, `ui/keyboard_probe.py`, `docs/keyboard-test-checklist.md`, Tests | committet (`2b7d022`) |
 | `.deutschlandgpt/plans/pre-development-readiness.md` | Readiness-Prüfung vor Entwicklungsbeginn | committet |
-| `.deutschlandgpt/anweisungen.md` | Projektanweisung: Handoff aktuell halten | nicht committet |
+| `.deutschlandgpt/anweisungen.md` | Projektanweisung: Handoff aktuell halten | committet (`568ed2f`) |
 | `docs/technical-design.md` | Technisches Umsetzungskonzept (Abschnitte 1–15) | committet (`423c161`) |
 | `docs/adr/0001-technology-choice.md` | ADR zur Technologiewahl | committet (`423c161`) |
 | `.deutschlandgpt/plans/technische-umsetzung-dokumentieren.md` | Plan aus der Planungsphase | nicht committet |
@@ -78,7 +79,7 @@ Phase 1 checks passed: `ruff format --check`, `ruff check`, `pyright` (0 errors)
 
 - [x] Missing tests: refresh with no following image (fallback to the last image), refresh to an empty list, navigation on an empty list, and `register_available=False` with `modified` (completed in Phase 2).
 - [ ] `navigate` does not signal “boundary reached” (FR-025 requires a visual cue); add this in `app` at the latest.
-- [ ] `validate_slot_profile` does not identify colliding slots and does not validate destination names against FR-034; address before the settings dialog.
+- [x] `validate_slot_profile` now identifies all colliding slot indexes and reports per-slot FR-034 `FolderNameError` values (Phase 3).
 - [x] Key-label learning logic (Technical Design 8.1, steps 2 and 4) was added in Phase 2.
 - Modules directly in the package root (`__main__.py`, later `bootstrap.py`) have no PySide6 import restriction; this is intentional because bootstrap may use Qt.
 
@@ -87,8 +88,9 @@ Phase 1 checks passed: `ruff format --check`, `ruff check`, `pyright` (0 errors)
 1. ~~Offene Punkte 1 und 2~~ (erledigt).
 2. ~~Projektgerüst + `core`~~ (Phase 1, erledigt).
 3. ~~Phase 2 – Keyboard prototype~~ (implemented and automatically verified; pending manual platform tests are listed in Section 9).
-4. Phase 3 – Dateisystem und Speicherung: Ordner-Scan, sicheres Kopieren (FR-046), SQLite-Register, Symlink-Erkennung (NFR-002), Einzelinstanz je Ordner (NFR-043) – mit Tests.
-5. Danach UI auf Basis von PySide6.
+4. ~~Phase 3 – `ports`, `fsops`, `store`, core follow-ups, and unit/integration tests~~ (completed; details in Section 10).
+5. Phase 4 – `app` use cases: open folder, toggle on/off including journal transaction and rollback, crash recovery, reconciliation (FR-070), fault-injection tests; `applog`.
+6. Danach Bildanzeige (`imaging`) und Haupt-UI auf Basis von PySide6.
 
 ## 8. Einstieg in der neuen Sitzung
 
@@ -123,5 +125,52 @@ Implemented the manual keyboard prototype and the outstanding Phase 1 test revie
 
 - Manually test actual Qt native event values with the probe on Linux X11 and Wayland, then Windows and macOS, following `docs/keyboard-test-checklist.md`. The automated Qt tests use synthetic Linux native scan code 25; they do not establish physical-device values on other systems.
 - On Linux, test QWERTY, QWERTZ, and AZERTY; check the `IntlBackslash` ISO key, AltGr, dead accents, and held-key repeat. Record each result in the checklist.
-- Remaining Phase 1 items are unchanged: provide an FR-025 boundary-reached signal/cue in `app`; improve `validate_slot_profile` collision details and destination-name validation against FR-034 before the settings dialog.
-- After manual review approval, proceed with Phase 3 file-system and persistence work described above.
+- Phase 3 addressed the `validate_slot_profile` collision-index and FR-034 destination-name gaps. The remaining Phase 1 follow-up is an FR-025 boundary-reached signal/cue in `app`.
+- Phase 3 is complete; its results and the Phase 4 handoff are in Section 10. Manual keyboard validation remains relevant before the main-window UI work.
+
+### Review Phase 2 (Ergebnis)
+
+Checks re-run in review: `uv sync --locked`, `ruff format --check`, `ruff check`, `pyright` (0 errors), `pytest` (182 tests) – all passed. Native tables spot-checked (Linux evdev+8 incl. Backquote 49, Backslash 51, IntlBackslash 94, punctuation 47/48/59/60/61; macOS `kVK_*` digits/punctuation/ISO_Section 0x0A; Windows Set 1 incl. 0x29/0x2B/0x56) – consistent. No blocking findings. Follow-ups:
+
+- [ ] Dead keys: after `´` + `e`, the composed `é` arrives on the `KeyE` event and is learned as the label of `KeyE` (`É`). Self-corrects on the next plain press; accept and mention in help (FR-086), or revisit with the manual test results.
+- [ ] FR-084 guard (`main_window_key_filter_enabled`) only checks visible top-level `QDialog`s and text widgets; when building the main window also respect `QApplication.activeModalWidget()` and `activePopupWidget()` (menus, combo popups).
+- [x] Added a Windows raw-key test: scan code `0x11` maps to `KeyW` while `native_virtual_key` is ignored (Phase 3).
+- AltGr: Qt xcb maps AltGr to `GroupSwitchModifier` (qtbase `qxcbkeyboard.cpp`), Windows reports Ctrl+Alt by default – both are blocked. Wayland still needs the manual check.
+- `ui` imports `core` directly in the probe; acceptable. In the main window, label learning and persistence (FR-060) should go through `app` and the settings store.
+- `docs/keyboard-test-checklist.md` results are still empty; Phase 3 does not depend on them, the main-window UI phase does.
+
+## 10. Phase 3 results
+
+Phase 3 (ports, filesystem operations, and persistence) is implemented. No new dependencies were added, no commit was created, and `docs/requirements.md`, `docs/technical-design.md`, and `docs/adr/` were not changed.
+
+### Implementation
+
+- Extended `core.slots.validate_slot_profile` to return immutable `ProfileIssue` values with all conflicting slot indexes and the exact `FolderNameError` for each invalid configured destination name.
+- Added UUID4-hex reserved temp-name generation/recognition and the pure `default_language(locale_name)` resolver. Added the Windows raw-key regression test (`scan code 0x11` -> `KeyW`, virtual key ignored).
+- Added typed `ports` Protocols, immutable transfer values, and translatable `StrEnum`-reason exceptions for filesystem, lock, settings, and state failures.
+- Added `fsops` source validation, exact-spelling/NFC folder identity, one-pass top-level scan, hidden/symlink/junction filtering, containment checks, destination resolution/creation/listing, streamed fingerprints, exclusive verified temp-copy, no-overwrite finalize, verified/confirmed deletion, reserved-temp cleanup, Windows extended paths, a `filelock`-based folder lock, and an aware UTC system clock.
+- Added `store` app-data path preparation, strict atomic `settings.json`, SQLite WAL/schema version 1 and 0-to-1 migration, profile/slot/copy/journal repositories, and explicit no-overwrite damaged-file quarantine.
+- Integration source guards snapshot file names, file SHA-256, symlink targets/content where local to `tmp_path`, and directory names after setup; only approved destination subfolders are excluded from the source snapshot.
+
+### Decisions and verified platform details
+
+- On case-sensitive filesystems, more than one real immediate subfolder with the same `comparison_key` yields `FAULTY(AMBIGUOUS)`. A matching file/link is reported as its own fault; no destination is selected when entries conflict.
+- Journal metadata is split into `operations` and child rows in `operation_files(operation_id, index, temp_name, final_name, expected_size, expected_sha256)`. `operations` stores the operation ID, profile/destination, state (`started`, `done`, `rolled_back`, `recovered`), and UTC timestamps. There is no `modified` column in `copies`.
+- The hardlink fallback is attempted only for `EPERM`, `EOPNOTSUPP`/`ENOTSUP`, `EMLINK`, and `EXDEV`. Other hardlink errors do not try a different primitive. A fallback that is unavailable/unsupported raises `FINALIZE_UNSUPPORTED`; no POSIX overwrite-capable rename is used. `FileExistsError` is a conflict and deliberately leaves the temp file intact for the caller to clean up.
+- Constants were checked against official sources: Linux UAPI `include/uapi/linux/fcntl.h` (`AT_FDCWD=-100`, no-replace flag value `0x0001`, exposed there as `AT_RENAME_NOREPLACE`) and Linux `rename(2)` man-pages (`RENAME_NOREPLACE` semantics); Apple XNU `bsd/sys/stdio.h` defines `RENAME_EXCL=0x00000004`. References: `https://github.com/torvalds/linux/blob/master/include/uapi/linux/fcntl.h`, `https://man7.org/linux/man-pages/man2/rename.2.html`, and `https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/stdio.h`.
+- Ruff's nested `ruff.toml` files were confirmed active: `ruff check --show-settings` reports the `PySide6` ban separately for `fsops`, `ports`, and `store`.
+
+### Verification
+
+- `uv sync --locked`: passed; 30 packages resolved, 26 checked; no dependency changes.
+- `uv run ruff format --check`: passed (66 files already formatted).
+- `uv run ruff check`: passed.
+- `uv run pyright`: passed (0 errors, warnings, or informations).
+- `uv run pytest`: passed (260 collected; 259 passed, 1 skipped). The skipped test is the Windows-only extended-length-path test, skipped on Linux.
+- `ruff check --show-settings` confirmed `PySide6` bans apply in all three adapter packages (`fsops`, `ports`, `store`).
+
+### Open points and next step
+
+- No unresolved Phase 3 design questions remain. Runtime validation of Windows extended paths, Windows/macOS no-replace behavior, macOS hidden flags, and cross-platform keyboard events still requires those platforms; the Windows long-path test was skipped on this Linux run.
+- Phase 1's FR-025 boundary-reached cue remains for `app`. Phase 2 follow-ups for dead-key label learning and respecting `QApplication.activeModalWidget()`/`activePopupWidget()` remain for help/main-window UI work; manual keyboard checklist results are still pending.
+- Next: Phase 4 `app` use cases and orchestration (folder opening, toggle sequencing, journal/rollback, crash recovery, FR-070 reconciliation), followed by `applog`.

@@ -88,6 +88,18 @@ def test_macos_uses_native_virtual_key_in_raw_event_logic() -> None:
     assert data.position == "KeyW"
 
 
+def test_windows_uses_scan_code_and_ignores_native_virtual_key() -> None:
+    data = keyboard_event_from_raw(
+        native_scan_code=0x11,
+        native_virtual_key=0x41,
+        modifiers=Qt.KeyboardModifier.NoModifier,
+        auto_repeat=False,
+        text="w",
+        platform=NativeKeyPlatform.WINDOWS,
+    )
+    assert data.position == "KeyW"
+
+
 def test_unknown_scan_code_has_no_slot_position() -> None:
     data = keyboard_event_from_raw(
         native_scan_code=999,

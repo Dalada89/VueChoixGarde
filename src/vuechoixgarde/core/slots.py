@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from vuechoixgarde.core.comparison import comparison_key
+from vuechoixgarde.core.folder_names import FolderNameError, validate_folder_name
 from vuechoixgarde.core.keys import is_allowed_slot_key
 
 
@@ -32,6 +33,16 @@ class ProfileError(StrEnum):
     INVALID_KEY = "invalid_key"
     DUPLICATE_KEY = "duplicate_key"
     DUPLICATE_NAME = "duplicate_name"
+    INVALID_NAME = "invalid_name"
+
+
+@dataclass(frozen=True)
+class ProfileIssue:
+    """A profile validation issue with the slot indexes that caused it."""
+
+    error: ProfileError
+    slot_indexes: tuple[int, ...]
+    name_error: FolderNameError | None = None
 
 
 DEFAULT_SLOTS = (
@@ -42,21 +53,33 @@ DEFAULT_SLOTS = (
 )
 
 
-def validate_slot_profile(slots: Sequence[Slot]) -> tuple[ProfileError, ...]:
-    """Return all FR-032/FR-033 profile errors without mutating slot data."""
-    errors: list[ProfileError] = []
+def validate_slot_profile(slots: Sequence[Slot]) -> tuple[ProfileIssue, ...]:
+    """Return all FR-032/FR-033 validation issues with affected slot indexes."""
+    issues: list[ProfileIssue] = []
     if not 1 <= len(slots) <= 12:
-        errors.append(ProfileError.TOO_FEW_SLOTS if not slots else ProfileError.TOO_MANY_SLOTS)
+        error = ProfileError.TOO_FEW_SLOTS if not slots else ProfileError.TOO_MANY_SLOTS
+        issues.append(ProfileIssue(error, ()))
 
-    keys = [slot.key_position for slot in slots]
-    if any(not is_allowed_slot_key(key) for key in keys):
-        errors.append(ProfileError.INVALID_KEY)
-    if len(set(keys)) != len(keys):
-        errors.append(ProfileError.DUPLICATE_KEY)
+    keys: dict[str, list[int]] = {}
+    names: dict[str, list[int]] = {}
+    for index, slot in enumerate(slots):
+        if not is_allowed_slot_key(slot.key_position):
+            issues.append(ProfileIssue(ProfileError.INVALID_KEY, (index,)))
+        keys.setdefault(slot.key_position, []).append(index)
+        if slot.destination_name is not None:
+            name_error = validate_folder_name(slot.destination_name)
+            if name_error is not None:
+                issues.append(ProfileIssue(ProfileError.INVALID_NAME, (index,), name_error))
+            names.setdefault(comparison_key(slot.destination_name), []).append(index)
 
-    names = [
-        comparison_key(slot.destination_name) for slot in slots if slot.destination_name is not None
-    ]
-    if len(set(names)) != len(names):
-        errors.append(ProfileError.DUPLICATE_NAME)
-    return tuple(errors)
+    issues.extend(
+        ProfileIssue(ProfileError.DUPLICATE_KEY, tuple(indexes))
+        for indexes in keys.values()
+        if len(indexes) > 1
+    )
+    issues.extend(
+        ProfileIssue(ProfileError.DUPLICATE_NAME, tuple(indexes))
+        for indexes in names.values()
+        if len(indexes) > 1
+    )
+    return tuple(issues)
