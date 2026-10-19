@@ -74,9 +74,13 @@ def main_window_key_filter_enabled() -> bool:
     """Disable main-window shortcuts while a dialog or text editor owns interaction (FR-084)."""
     if QApplication.instance() is None:
         return False
-    if any(
-        isinstance(widget, QDialog) and widget.isVisible()
-        for widget in QApplication.topLevelWidgets()
+    if (
+        QApplication.activeModalWidget() is not None
+        or QApplication.activePopupWidget() is not None
+        or any(
+            isinstance(widget, QDialog) and widget.isVisible()
+            for widget in QApplication.topLevelWidgets()
+        )
     ):
         return False
 

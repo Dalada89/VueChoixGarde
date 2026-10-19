@@ -101,3 +101,4 @@ class SessionSnapshot:
     checking: bool
     register_available: bool
     reconciled: tuple[ReconcileItem, ...]
+    recovery_pending: bool = False

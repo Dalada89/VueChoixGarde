@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import uuid4
 
 from vuechoixgarde.app.gate import OperationGate
 from vuechoixgarde.app.reconcile import reconcile
@@ -70,6 +71,7 @@ class FolderSession:
         self.logger = logger
         self.reconciled: tuple[ReconcileItem, ...] = ()
         self.checking = False
+        self.recovery_pending = False
         self.boundary_reached = False
         self.closed = False
 
@@ -96,10 +98,20 @@ class FolderSession:
             lock = lock_factory.create(identity)
             lock.acquire()
             scan = scanner.scan_source_folder(source_path)
-            profile = state.get_profile_by_identity(identity)
-            if profile is None:
-                profile = state.create_profile_from_template(
-                    identity, str(source_path.resolve()), settings.global_slot_template
+            if register_available:
+                profile = state.get_profile_by_identity(identity)
+                if profile is None:
+                    profile = state.create_profile_from_template(
+                        identity, str(source_path.resolve()), settings.global_slot_template
+                    )
+            else:
+                profile = ProfileRecord(
+                    uuid4().hex,
+                    identity,
+                    str(source_path.resolve()),
+                    "",
+                    "",
+                    settings.global_slot_template,
                 )
             navigation = create_navigation(
                 scan.images,
@@ -125,8 +137,7 @@ class FolderSession:
                 recovery = recover_operations(
                     state, filesystem, profile.id, session.source_path, logger=logger
                 )
-                if recovery.errors or recovery.pending:
-                    session.checking = True
+                session.recovery_pending = bool(recovery.errors or recovery.pending)
                 session.reconcile(automatic=True, acquire_gate=False)
             _safe_log(
                 logger,
@@ -159,8 +170,7 @@ class FolderSession:
 
     def set_sort_direction(self, *, descending: bool) -> SessionSnapshot:
         """Persist sort preference and reorder while preserving the current image."""
-        self.navigation = change_sort_direction(self.navigation, descending=descending)
-        self.boundary_reached = False
+        updated_navigation = change_sort_direction(self.navigation, descending=descending)
         updated_settings = Settings(
             self.settings.schema_version,
             self.settings.language,
@@ -172,7 +182,9 @@ class FolderSession:
             self.settings.learned_key_labels,
         )
         self.settings_store.save(updated_settings)
+        self.navigation = updated_navigation
         self.settings = updated_settings
+        self.boundary_reached = False
         return self.snapshot()
 
     def refresh(self) -> SessionSnapshot:
@@ -228,6 +240,8 @@ class FolderSession:
                 SlotState.NO_DESTINATION if slot.destination_name is None else SlotState.READY
                 for slot in self.profile.slots
             )
+        if self.recovery_pending:
+            return tuple(SlotState.CHECKING for _ in self.profile.slots)
         sidecars = sidecars_for_image(current, self.scan.sidecar_candidates)
         outcomes: list[SlotState] = []
         for slot in self.profile.slots:
@@ -265,12 +279,15 @@ class FolderSession:
                 ]
                 if matching_records:
                     classes = {
-                        item.record.destination_name: item.file_class
+                        (item.record.destination_folder, item.record.destination_name): (
+                            item.file_class
+                        )
                         for item in self.reconciled
                         if item.file_class is not None
                     }
                     if any(
-                        classes.get(record.destination_name) is FileClass.MODIFIED
+                        classes.get((record.destination_folder, record.destination_name))
+                        is FileClass.MODIFIED
                         for record in matching_records
                     ):
                         outcomes.append(SlotState.MODIFIED)
@@ -305,6 +322,7 @@ class FolderSession:
             checking=self.checking,
             register_available=self.register_available,
             reconciled=self.reconciled,
+            recovery_pending=self.recovery_pending,
         )
 
     def close(self) -> None:

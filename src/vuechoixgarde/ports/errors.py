@@ -25,6 +25,25 @@ class FileSystemErrorReason(StrEnum):
     IO_ERROR = "io_error"
 
 
+class ImageDecodeErrorReason(StrEnum):
+    """Stable image decoding failures suitable for translation by the UI."""
+
+    MISSING = "missing"
+    UNSUPPORTED = "unsupported"
+    CORRUPT = "corrupt"
+    TOO_LARGE = "too_large"
+    HEIC_UNAVAILABLE = "heic_unavailable"
+
+
+class ImageDecodeError(Exception):
+    """Typed image decode failure that does not expose image metadata."""
+
+    def __init__(self, reason: ImageDecodeErrorReason, path: Path) -> None:
+        self.reason = reason
+        self.path = path
+        super().__init__(f"{reason}: {path.name}")
+
+
 class FolderLockErrorReason(StrEnum):
     """Stable lock acquisition failure reasons."""
 

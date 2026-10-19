@@ -25,7 +25,7 @@ def reconcile(
     try:
         records = state.copy_records(profile_id)
     except Exception:
-        _safe_log(logger, LogLevel.ERROR, "reconcile", "register unavailable", error_count=1)
+        _safe_log(logger, LogLevel.ERROR, "register unavailable", error_count=1)
         return ReconcileReport((), 0, 0, 0, 1, automatic)
 
     for record in records:
@@ -69,7 +69,6 @@ def reconcile(
     _safe_log(
         logger,
         LogLevel.INFO if errors == 0 else LogLevel.WARNING,
-        "reconcile",
         "reconciliation completed",
         automatic=automatic,
         removed=removed,
@@ -89,7 +88,6 @@ def _error_reason(error: Exception) -> str:
 def _safe_log(
     logger: EventLogger | None,
     level: LogLevel,
-    event: str,
     message: str,
     **fields: object,
 ) -> None:

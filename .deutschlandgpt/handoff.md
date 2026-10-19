@@ -200,3 +200,33 @@ Phase 4 (`app` orchestration and `applog`) is implemented and verified. The FR-0
 
 - Runtime validation of Windows/macOS path/finalization behavior and manual cross-platform keyboard events remains platform-dependent.
 - Phase 5 starts with imaging/bootstrap/UI; do not fold the excluded Phase 4 UI, worker, imaging, i18n, sound, or profile/template work into the completed app layer.
+
+## 12. Phase 5 results
+
+Phase 5 imaging, worker infrastructure, bootstrap, and a minimal functional main window are implemented. No dependency was added, no commit was created, and `docs/requirements.md`, `docs/technical-design.md`, and `docs/adr/` were not changed.
+
+### Implementation and decisions
+
+- Fixed Phase 4 review items: slot modified-state matching now keys by `(destination_folder, destination_name)`; recovery-pending is preserved in `SessionSnapshot` and shown as checking; `_safe_log` no longer accepts the unused event name; sort state is committed only after settings save succeeds. When the register is unavailable, a folder can still open with an ephemeral read-only profile; persisted damaged SQLite bytes are left untouched. A separate SQLite-only acceptance path is tested.
+- Added `ports/imaging.py`, typed decode failures, Pillow decoding for the first frame/page, EXIF transpose, JPEG draft, bounded LANCZOS downscale without upscaling, RGB/RGBA buffers, decompression-bomb handling, and optional `pi-heif` registration. Image decoding is read-only and does not log image data or metadata.
+- Added a Qt-free bounded LRU-style decoded buffer cache with entry/byte limits and generation checks. Added one serialized file-operation pool and a two-thread decode pool; session methods are only invoked from the file worker and results are delivered to the UI through queued Qt signals.
+- Added `bootstrap.py` composition of the existing stores, filesystem, lock, clock and JSONL logger; damaged-data accept/view-only choice; startup/shutdown events; and `__main__.py` application startup/error handling.
+- Added an English keyed UI text source (migration point for Phase 6), a high-contrast dark stylesheet, main image/navigation/status/slot views, keyboard routing through the existing physical-key adapter, asynchronous folder/toggle/reconcile flows, live folder-name validation, modified-copy confirmation defaulting to Cancel, decode/error display, and orderly close. Settings and Help remain disabled placeholders as scoped.
+- Test images are generated at test time. No bundled HEIC sample was added because the repository has no approved/licensed redistributable fixture; the HEIC-unavailable error path is covered with a typed test.
+
+### Verification
+
+- `uv sync --locked`: passed; no dependency changes.
+- `uv run ruff format --check`: passed (97 files already formatted).
+- `uv run ruff check`: passed.
+- `uv run pyright`: passed (0 errors, warnings, or informations).
+- `uv run pytest`: passed (303 collected; 302 passed, 1 skipped). The skipped case is the Windows-only extended-length-path test on Linux.
+- Imaging Ruff settings show the `PySide6` ban is active. Temporary probes confirmed `imaging -> PySide6` and `app -> ui` are rejected; both probes were removed.
+- Offscreen entry-point smoke run completed with exit code 0. The rendered main-window capture showed the image centered and contained, the profile/top controls, filename/progress, and all four default slot tiles; no application exception was reported. Qt's offscreen plugin emitted only `propagateSizeHints()` notices.
+- Synthetic Linux performance smoke: a generated 19,691,695-byte 6000×4000 JPEG decoded to 1620×1080 in 0.357 s; scanning 10,001 supported files completed in 0.084 s. These are local smoke measurements, not CI thresholds or cross-platform guarantees.
+
+### Remaining work / Phase 6
+
+- Manual physical-key validation remains open on Linux X11 and Wayland, Windows, and macOS; the automated Qt tests do not replace those hardware/layout checks.
+- Validate real HEIC/HEIF images and bundled licensing/wheel support on release platforms. Only the unavailable-plugin path is automated so far.
+- Settings and profile editing, DE/EN/FR catalogs, Help/F1, sound, final visual/contrast review, packaging/CI and additional profile workflows remain Phase 6 scope.
