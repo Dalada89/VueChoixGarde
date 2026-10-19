@@ -15,6 +15,7 @@ from vuechoixgarde.core.slots import DEFAULT_SLOTS, Slot, validate_slot_profile
 from vuechoixgarde.ports.clock import Clock
 from vuechoixgarde.ports.errors import SettingsErrorReason, SettingsStoreError
 from vuechoixgarde.ports.models import LoadStatus, Settings, SettingsLoadResult
+from vuechoixgarde.store.damage import quarantine_damaged
 from vuechoixgarde.store.paths import prepare_application_data
 
 _COLOR_PATTERN = re.compile(r"#[0-9a-fA-F]{6}")
@@ -84,6 +85,19 @@ class JsonSettingsStore:
                 LoadStatus.DAMAGED, reason=SettingsErrorReason.INVALID_SETTINGS, detail=str(error)
             )
         return SettingsLoadResult(LoadStatus.LOADED, settings)
+
+    def reset_damaged(self) -> Path | None:
+        """Quarantine a damaged settings file and persist fresh defaults."""
+        result = self.load()
+        if result.status is LoadStatus.LOADED:
+            return None
+        if result.status is LoadStatus.CREATED_DEFAULTS:
+            return None
+        quarantined: Path | None = None
+        if self.path.exists():
+            quarantined = quarantine_damaged(self.path, self.clock)
+        self.save(self.defaults())
+        return quarantined
 
     def save(self, settings: Settings) -> None:
         """Validate and atomically persist settings with a same-directory fsynced temp file."""

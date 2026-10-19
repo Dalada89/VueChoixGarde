@@ -1,6 +1,7 @@
 """SQLite-backed profile, copy-register, and operation-journal port contract."""
 
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Protocol
 
 from vuechoixgarde.core.slots import Slot
@@ -18,6 +19,10 @@ class StateStore(Protocol):
 
     def load(self) -> StateLoadResult:
         """Open/migrate the schema or report damaged data without modifying it."""
+        ...
+
+    def reset_damaged(self) -> Path | None:
+        """Quarantine damaged SQLite state and establish a new empty schema."""
         ...
 
     def get_profile_by_identity(self, folder_identity: str) -> ProfileRecord | None:

@@ -1,1 +1,1 @@
-"""Coordinate application use cases."""
+"""Synchronous, Qt-free application use cases."""

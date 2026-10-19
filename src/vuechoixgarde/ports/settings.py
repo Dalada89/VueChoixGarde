@@ -1,5 +1,6 @@
 """Settings persistence contract for Section 6.2 and FR-060."""
 
+from pathlib import Path
 from typing import Protocol
 
 from vuechoixgarde.ports.models import Settings, SettingsLoadResult
@@ -14,4 +15,8 @@ class SettingsStore(Protocol):
 
     def save(self, settings: Settings) -> None:
         """Validate and atomically persist settings."""
+        ...
+
+    def reset_damaged(self) -> Path | None:
+        """Quarantine damaged settings and persist defaults; return the quarantine path."""
         ...

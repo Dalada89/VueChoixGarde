@@ -434,3 +434,73 @@ def test_windows_extended_path_prefix_supports_long_paths(source_guard) -> None:
     assert filesystem.extended_path(current).is_absolute()
     source_guard.seal()
     LocalFileSystem.check_source_folder(current)
+
+
+def test_file_metadata_returns_fingerprint_size_and_mtime_without_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    path = root / "photo.jpg"
+    path.write_bytes(b"image bytes")
+    expected_mtime = 1_735_789_445_987_654_321
+    os.utime(path, ns=(expected_mtime, expected_mtime))
+    fingerprint = LocalFileSystem.fingerprint_file(root, path)
+
+    def unexpected_read(*_args, **_kwargs):
+        raise AssertionError("metadata lookup must not read file contents")
+
+    monkeypatch.setattr(Path, "open", unexpected_read)
+    monkeypatch.setattr(filesystem, "_hash_stream", unexpected_read)
+
+    metadata = LocalFileSystem.file_metadata(root, path)
+    assert metadata is not None
+    assert metadata.size == fingerprint.size == len(b"image bytes")
+    assert metadata.mtime_ns == fingerprint.mtime_ns == expected_mtime
+
+
+def test_file_metadata_returns_none_for_missing_file(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+
+    assert LocalFileSystem.file_metadata(root, root / "missing.jpg") is None
+
+
+def test_file_metadata_rejects_outside_path(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"outside")
+
+    with pytest.raises(FileSystemError) as caught:
+        LocalFileSystem.file_metadata(root, outside)
+    assert caught.value.reason is FileSystemErrorReason.PATH_OUTSIDE_ROOT
+
+
+def test_file_metadata_rejects_symlink(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"outside")
+    link = root / "linked.jpg"
+    try:
+        link.symlink_to(outside)
+    except OSError as error:
+        pytest.skip(f"symlink creation is unavailable: {error}")
+
+    with pytest.raises(FileSystemError) as caught:
+        LocalFileSystem.file_metadata(root, link)
+    assert caught.value.reason is FileSystemErrorReason.IO_ERROR
+    assert caught.value.detail == "not a regular file"
+
+
+def test_file_metadata_rejects_non_regular_file(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    folder = root / "folder"
+    folder.mkdir()
+
+    with pytest.raises(FileSystemError) as caught:
+        LocalFileSystem.file_metadata(root, folder)
+    assert caught.value.reason is FileSystemErrorReason.IO_ERROR
+    assert caught.value.detail == "not a regular file"

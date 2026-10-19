@@ -3,7 +3,12 @@
 from pathlib import Path
 from typing import Protocol
 
-from vuechoixgarde.ports.models import DestinationResolution, FileFingerprint, SourceScan
+from vuechoixgarde.ports.models import (
+    DestinationResolution,
+    FileFingerprint,
+    FileMetadata,
+    SourceScan,
+)
 
 
 class SourceFolderScanner(Protocol):
@@ -43,6 +48,10 @@ class FileSystemPort(Protocol):
 
     def fingerprint_file(self, source_root: Path, path: Path) -> FileFingerprint:
         """Stream a file's SHA-256 and return size plus `mtime_ns` evidence."""
+        ...
+
+    def file_metadata(self, source_root: Path, path: Path) -> FileMetadata | None:
+        """Return metadata for a contained regular file, or `None` if it is absent."""
         ...
 
     def copy_to_temp(

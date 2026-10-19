@@ -28,6 +28,7 @@ from vuechoixgarde.ports.models import (
     DestinationResolution,
     DestinationStatus,
     FileFingerprint,
+    FileMetadata,
     SourceScan,
 )
 
@@ -256,6 +257,28 @@ def fingerprint_file(source_root: Path, path: Path) -> FileFingerprint:
     except OSError as error:
         raise _raise_fs_error(FileSystemErrorReason.IO_ERROR, path, str(error)) from error
     return FileFingerprint(size, digest, file_stat.st_mtime_ns)
+
+
+def file_metadata(source_root: Path, path: Path) -> FileMetadata | None:
+    """Return size and mtime_ns of a contained regular file without reading its contents."""
+    if not is_inside(path.parent, source_root):
+        raise _raise_fs_error(FileSystemErrorReason.PATH_OUTSIDE_ROOT, path)
+    candidate = extended_path(path)
+    try:
+        file_stat = candidate.lstat()
+        if _is_link_or_junction(candidate):
+            raise _raise_fs_error(FileSystemErrorReason.IO_ERROR, path, "not a regular file")
+        if not is_inside(path, source_root):
+            raise _raise_fs_error(FileSystemErrorReason.PATH_OUTSIDE_ROOT, path)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise _raise_fs_error(FileSystemErrorReason.IO_ERROR, path, "not a regular file")
+    except FileNotFoundError:
+        return None
+    except FileSystemError:
+        raise
+    except OSError as error:
+        raise _raise_fs_error(FileSystemErrorReason.IO_ERROR, path, str(error)) from error
+    return FileMetadata(file_stat.st_size, file_stat.st_mtime_ns)
 
 
 def _destination_names(destination: Path) -> tuple[str, ...]:
@@ -587,6 +610,7 @@ class LocalFileSystem:
     create_destination_folder = staticmethod(create_destination_folder)
     list_destination_names = staticmethod(list_destination_names)
     fingerprint_file = staticmethod(fingerprint_file)
+    file_metadata = staticmethod(file_metadata)
     copy_to_temp = staticmethod(copy_to_temp)
     finalize_temp_file = staticmethod(finalize_temp_file)
     delete_verified_file = staticmethod(delete_verified_file)

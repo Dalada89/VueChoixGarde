@@ -9,7 +9,7 @@ from pathlib import Path
 from vuechoixgarde.core.slots import Slot, validate_slot_profile
 from vuechoixgarde.core.temp_names import temp_file_name
 from vuechoixgarde.ports.clock import Clock
-from vuechoixgarde.ports.errors import StateStoreError, StateStoreErrorReason
+from vuechoixgarde.ports.errors import SettingsStoreError, StateStoreError, StateStoreErrorReason
 from vuechoixgarde.ports.models import (
     CopyRecord,
     LoadStatus,
@@ -19,6 +19,7 @@ from vuechoixgarde.ports.models import (
     ProfileRecord,
     StateLoadResult,
 )
+from vuechoixgarde.store.damage import quarantine_damaged
 from vuechoixgarde.store.paths import prepare_application_data
 
 _SCHEMA_VERSION = 1
@@ -173,6 +174,38 @@ class SQLiteStateStore:
             )
         status = LoadStatus.CREATED_DEFAULTS if was_missing else LoadStatus.LOADED
         return StateLoadResult(status, True)
+
+    def reset_damaged(self) -> Path | None:
+        """Quarantine damaged SQLite files and create a clean version-one database."""
+        result = self.load()
+        if result.status is LoadStatus.LOADED:
+            return None
+        if result.status is LoadStatus.CREATED_DEFAULTS:
+            return None
+
+        quarantined: Path | None = None
+        try:
+            for companion in (
+                self.path.with_name(f"{self.path.name}-wal"),
+                self.path.with_name(f"{self.path.name}-shm"),
+            ):
+                if companion.exists() or companion.is_symlink():
+                    quarantine_damaged(companion, self.clock)
+            if self.path.exists() or self.path.is_symlink():
+                quarantined = quarantine_damaged(self.path, self.clock)
+        except (OSError, ValueError, SettingsStoreError) as error:
+            raise StateStoreError(
+                StateStoreErrorReason.IO_ERROR, path=self.path, detail=str(error)
+            ) from error
+
+        fresh = self.load()
+        if fresh.status not in {LoadStatus.CREATED_DEFAULTS, LoadStatus.LOADED}:
+            raise StateStoreError(
+                fresh.reason or StateStoreErrorReason.MIGRATION_FAILURE,
+                path=self.path,
+                detail=fresh.detail,
+            )
+        return quarantined
 
     @staticmethod
     def _validate_slots(slots: Sequence[Slot]) -> tuple[Slot, ...]:

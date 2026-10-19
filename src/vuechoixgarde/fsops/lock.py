@@ -2,11 +2,13 @@
 
 import hashlib
 from pathlib import Path
+from types import TracebackType
 from typing import Self
 
 from filelock import FileLock, Timeout
 
 from vuechoixgarde.ports.errors import FolderLockError, FolderLockErrorReason
+from vuechoixgarde.ports.lock import FolderLock
 
 
 class LocalFolderLock:
@@ -45,6 +47,22 @@ class LocalFolderLock:
         self.acquire()
         return self
 
-    def __exit__(self, *_: object) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         """Release the lock when the context exits."""
         self.release()
+
+
+class LocalFolderLockFactory:
+    """Create concrete folder locks without coupling app use cases to `fsops`."""
+
+    def __init__(self, app_data_dir: Path) -> None:
+        self.app_data_dir = app_data_dir
+
+    def create(self, identity: str) -> FolderLock:
+        """Return an unacquired lock for the supplied folder identity."""
+        return LocalFolderLock(self.app_data_dir, identity)

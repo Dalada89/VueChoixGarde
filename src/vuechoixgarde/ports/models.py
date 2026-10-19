@@ -19,6 +19,14 @@ class FileFingerprint:
 
 
 @dataclass(frozen=True)
+class FileMetadata:
+    """Size and modification-time metadata for a regular file."""
+
+    size: int
+    mtime_ns: int
+
+
+@dataclass(frozen=True)
 class SourceScan:
     """One top-level source scan, preserving exact names from the directory listing."""
 

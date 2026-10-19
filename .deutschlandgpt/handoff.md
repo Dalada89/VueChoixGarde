@@ -1,6 +1,6 @@
 # Handoff – VueChoixGarde
 
-Status: Phase 3 (ports, fsops, store) implemented and verified; 259 tests passed and one Windows-only test was skipped on Linux. Phase 2 manual cross-platform keyboard validation remains pending. No Phase 3 commit was created. Next: Phase 4 (`app` use cases and orchestration).
+Status: Phase 4 (`app` use cases and orchestration, `applog`, and FR-070 metadata reconciliation) implemented and verified; 284 tests passed and one Windows-only test was skipped on Linux. Phase 2 manual cross-platform keyboard validation remains pending. No commit was created.
 Zweck: Fortsetzung der Arbeit auf einem anderen Rechner bzw. in einer neuen Sitzung.
 
 ## 1. Ziel des Projekts
@@ -78,7 +78,7 @@ Kann später entschieden werden:
 Phase 1 checks passed: `ruff format --check`, `ruff check`, `pyright` (0 errors), `pytest` (136 tests). Ruff architecture rules are active (verified with `--show-settings` for `core`: PySide6 and network modules are blocked). No blocking findings. Review follow-ups:
 
 - [x] Missing tests: refresh with no following image (fallback to the last image), refresh to an empty list, navigation on an empty list, and `register_available=False` with `modified` (completed in Phase 2).
-- [ ] `navigate` does not signal “boundary reached” (FR-025 requires a visual cue); add this in `app` at the latest.
+- [x] `FolderSession.navigate` now exposes `boundary_reached` in its immutable read model for the FR-025 visual cue.
 - [x] `validate_slot_profile` now identifies all colliding slot indexes and reports per-slot FR-034 `FolderNameError` values (Phase 3).
 - [x] Key-label learning logic (Technical Design 8.1, steps 2 and 4) was added in Phase 2.
 - Modules directly in the package root (`__main__.py`, later `bootstrap.py`) have no PySide6 import restriction; this is intentional because bootstrap may use Qt.
@@ -89,8 +89,8 @@ Phase 1 checks passed: `ruff format --check`, `ruff check`, `pyright` (0 errors)
 2. ~~Projektgerüst + `core`~~ (Phase 1, erledigt).
 3. ~~Phase 2 – Keyboard prototype~~ (implemented and automatically verified; pending manual platform tests are listed in Section 9).
 4. ~~Phase 3 – `ports`, `fsops`, `store`, core follow-ups, and unit/integration tests~~ (completed; details in Section 10).
-5. Phase 4 – `app` use cases: open folder, toggle on/off including journal transaction and rollback, crash recovery, reconciliation (FR-070), fault-injection tests; `applog`.
-6. Danach Bildanzeige (`imaging`) und Haupt-UI auf Basis von PySide6.
+5. ~~Phase 4 – `app` use cases and orchestration, crash recovery, FR-070 reconciliation, fault-injection tests, and `applog`~~ (implemented and verified; details in Section 11).
+6. Next: Phase 5 – image display (`imaging`), bootstrap, and the PySide6 main UI; preserve the documented exclusions and pending cross-platform keyboard validation.
 
 ## 8. Einstieg in der neuen Sitzung
 
@@ -172,5 +172,31 @@ Phase 3 (ports, filesystem operations, and persistence) is implemented. No new d
 ### Open points and next step
 
 - No unresolved Phase 3 design questions remain. Runtime validation of Windows extended paths, Windows/macOS no-replace behavior, macOS hidden flags, and cross-platform keyboard events still requires those platforms; the Windows long-path test was skipped on this Linux run.
-- Phase 1's FR-025 boundary-reached cue remains for `app`. Phase 2 follow-ups for dead-key label learning and respecting `QApplication.activeModalWidget()`/`activePopupWidget()` remain for help/main-window UI work; manual keyboard checklist results are still pending.
-- Next: Phase 4 `app` use cases and orchestration (folder opening, toggle sequencing, journal/rollback, crash recovery, FR-070 reconciliation), followed by `applog`.
+- FR-025's `boundary_reached` signal is implemented in the Phase 4 folder-session read model. Phase 2 follow-ups for dead-key label learning and respecting `QApplication.activeModalWidget()`/`activePopupWidget()` remain for help/main-window UI work; manual keyboard checklist results are still pending.
+- Next: Phase 5 – imaging, bootstrap, and the PySide6 UI. FR-071 remains deferred; UI/Qt, workers, imaging, i18n, sound, and profile/template administration were outside Phase 4 scope.
+
+## 11. Phase 4 results
+
+Phase 4 (`app` orchestration and `applog`) is implemented and verified. The FR-070 automatic metadata shortcut was unblocked by the approved `FileMetadata`/`FileSystemPort.file_metadata` addition. No new dependencies were added, no commit was created, and `docs/requirements.md`, `docs/technical-design.md`, and `docs/adr/` were not changed.
+
+### Implementation
+
+- Added immutable `FileMetadata(size, mtime_ns)` and a `LocalFileSystem.file_metadata` operation using `lstat`, containment checks, and link/non-regular-file rejection without opening file contents.
+- Added synchronous Qt-free `app` use cases: nonblocking operation gate; startup load plus explicit damaged-data accept/decline; folder lock/session lifecycle; navigation boundary signal, sorting, refresh, slot read models, destination naming, and persistent eligible key labels.
+- Added fresh toggle preflight and execution with ABSENT/VERIFIED/MODIFIED/FOREIGN classification, full hashes before toggle decisions, no-overwrite finalization, journal-before-copy, atomic register completion, confirmation before deleting modified managed copies, conflict preservation, shared-sidecar retention, and exception-only rollback.
+- Added profile-scoped journal recovery before folder-open reconciliation; recovery touches only journal-listed temps/finals and leaves modified or ambiguous files pending. Reconciliation removes stale register rows, skips automatic hashing only for matching size/mtime, always hashes in manual mode, and never changes image files.
+- Added clock-injected UTF-8 JSONL logging with bounded rotation, reference-counted close, privacy-safe app events, and failures contained from the application. Added protocol fakes and fault-injection/crash coverage under `tests/fakes/`.
+
+### Verification
+
+- `uv sync --locked`: passed; dependencies unchanged.
+- `uv run ruff format --check`: passed (83 files already formatted).
+- `uv run ruff check`: passed.
+- `uv run pyright`: passed (0 errors, warnings, or informations).
+- `uv run pytest`: passed (285 collected; 284 passed, 1 skipped). The skipped case is the Windows-only extended-length-path test on Linux.
+- Nested Ruff settings for `app` and `applog` were inspected: TID251 is active and preserves the parent network bans. Temporary forbidden-import probes were rejected for `app -> store` and `applog -> core` as expected, then removed.
+
+### Remaining work
+
+- Runtime validation of Windows/macOS path/finalization behavior and manual cross-platform keyboard events remains platform-dependent.
+- Phase 5 starts with imaging/bootstrap/UI; do not fold the excluded Phase 4 UI, worker, imaging, i18n, sound, or profile/template work into the completed app layer.

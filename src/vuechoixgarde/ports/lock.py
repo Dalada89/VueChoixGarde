@@ -1,7 +1,17 @@
 """Per-source-folder lock contract for NFR-043."""
 
+from __future__ import annotations
+
 from types import TracebackType
 from typing import Protocol, Self
+
+
+class FolderLockFactory(Protocol):
+    """Create a lock for a canonical source-folder identity."""
+
+    def create(self, identity: str) -> FolderLock:
+        """Return an unacquired lock for `identity`."""
+        ...
 
 
 class FolderLock(Protocol):

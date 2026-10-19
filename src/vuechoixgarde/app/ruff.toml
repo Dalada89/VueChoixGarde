@@ -1,4 +1,4 @@
 extend = "../../../pyproject.toml"
 
 [lint.flake8-tidy-imports]
-extend-banned-api = { "PySide6" = { msg = "Qt imports are forbidden in app (NFR-030)." } }
+extend-banned-api = { "PySide6" = { msg = "Qt imports are forbidden in app (NFR-030)." }, "vuechoixgarde.applog" = { msg = "app may depend only on core, ports, and the standard library." }, "vuechoixgarde.fsops" = { msg = "app may depend only on core, ports, and the standard library." }, "vuechoixgarde.i18n" = { msg = "app may depend only on core, ports, and the standard library." }, "vuechoixgarde.imaging" = { msg = "app may depend only on core, ports, and the standard library." }, "vuechoixgarde.store" = { msg = "app may depend only on core, ports, and the standard library." }, "vuechoixgarde.ui" = { msg = "app may depend only on core, ports, and the standard library." } }
