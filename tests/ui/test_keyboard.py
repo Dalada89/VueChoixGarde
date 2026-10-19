@@ -1,7 +1,7 @@
 import pytest
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import QDialog, QLineEdit, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QMenu, QWidget
 from pytestqt.qtbot import QtBot
 
 from vuechoixgarde.core.native_keys import NativeKeyPlatform
@@ -137,3 +137,13 @@ def test_main_window_shortcut_filter_is_disabled_while_dialog_is_open(qtbot: QtB
     dialog.show()
     qtbot.waitUntil(dialog.isVisible)
     assert not main_window_key_filter_enabled()
+
+
+def test_main_window_shortcut_filter_is_disabled_while_popup_is_open(qtbot: QtBot) -> None:
+    menu = QMenu()
+    qtbot.addWidget(menu)
+    menu.addAction("item")
+    menu.popup(menu.pos())
+    qtbot.waitUntil(lambda: QApplication.activePopupWidget() is menu)
+    assert not main_window_key_filter_enabled()
+    menu.close()

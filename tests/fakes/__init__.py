@@ -139,6 +139,19 @@ class InMemoryStateStore(StateStore):
             None,
         )
 
+    def list_profiles(self) -> tuple[ProfileRecord, ...]:
+        return tuple(self.profiles.values())
+
+    def delete_profile(self, profile_id: str) -> None:
+        self._profile(profile_id)
+        self.profiles.pop(profile_id)
+        self.records = [record for record in self.records if record.profile_id != profile_id]
+        self.operations = {
+            operation_id: operation
+            for operation_id, operation in self.operations.items()
+            if operation.profile_id != profile_id
+        }
+
     def create_profile_from_template(
         self, folder_identity: str, display_path: str, slots: Sequence[Slot]
     ) -> ProfileRecord:
@@ -161,11 +174,20 @@ class InMemoryStateStore(StateStore):
         )
 
     def reassign_profile(
-        self, profile_id: str, folder_identity: str, display_path: str
+        self,
+        profile_id: str,
+        folder_identity: str,
+        display_path: str,
+        *,
+        replace_profile_id: str | None = None,
     ) -> ProfileRecord:
         collision = self.get_profile_by_identity(folder_identity)
         if collision is not None and collision.id != profile_id:
-            raise ValueError("profile identity already exists")
+            if collision.id != replace_profile_id:
+                raise ValueError("profile identity already exists")
+            if any(record.profile_id == collision.id for record in self.records):
+                raise ValueError("target profile has copy records")
+            self.delete_profile(collision.id)
         profile = self._profile(profile_id)
         updated = replace(
             profile,

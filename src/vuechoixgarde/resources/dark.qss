@@ -15,6 +15,12 @@ QPushButton {
     padding: 6px 10px;
 }
 QPushButton:hover { background-color: #4A4A4A; }
+QFrame#slotStripe { background-color: palette(button); border-radius: 2px; }
+QLabel#busyLabel { color: #F2D06B; font-weight: bold; }
+QLabel#validationMessage { color: #FF8A80; }
+QLabel#keyLabel { font-weight: bold; }
+QFrame#slotEditorRow { background-color: #383838; border-radius: 4px; }
+QLabel#colorSample { background-color: palette(window); border: 1px solid #FFFFFF; border-radius: 3px; }
 QPushButton:disabled { color: #B0B0B0; border-color: #686868; }
 QPushButton:focus, QLineEdit:focus {
     border: 2px solid #FFFFFF;

@@ -29,6 +29,14 @@ class StateStore(Protocol):
         """Find a profile by canonical source-folder identity."""
         ...
 
+    def list_profiles(self) -> tuple[ProfileRecord, ...]:
+        """Return all persisted profiles in deterministic creation order."""
+        ...
+
+    def delete_profile(self, profile_id: str) -> None:
+        """Delete profile metadata, register, and closed journal rows, never image files."""
+        ...
+
     def create_profile_from_template(
         self, folder_identity: str, display_path: str, slots: Sequence[Slot]
     ) -> ProfileRecord:
@@ -48,8 +56,10 @@ class StateStore(Protocol):
         profile_id: str,
         folder_identity: str,
         display_path: str,
+        *,
+        replace_profile_id: str | None = None,
     ) -> ProfileRecord:
-        """Reassign profile identity and register paths transactionally (FR-042)."""
+        """Reassign a profile and register paths transactionally (FR-042)."""
         ...
 
     def copy_records(

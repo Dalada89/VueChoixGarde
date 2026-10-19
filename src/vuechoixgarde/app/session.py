@@ -72,6 +72,7 @@ class FolderSession:
         self.reconciled: tuple[ReconcileItem, ...] = ()
         self.checking = False
         self.recovery_pending = False
+        self.slot_status_warning = False
         self.boundary_reached = False
         self.closed = False
 
@@ -235,6 +236,7 @@ class FolderSession:
     def slot_states(self, image_name: str | None = None) -> tuple[SlotState, ...]:
         """Derive per-slot status for the current image from the register and filesystem."""
         current = image_name if image_name is not None else self.navigation.current
+        self.slot_status_warning = False
         if current is None:
             return tuple(
                 SlotState.NO_DESTINATION if slot.destination_name is None else SlotState.READY
@@ -300,6 +302,13 @@ class FolderSession:
                 else:
                     outcomes.append(SlotState.READY)
             except Exception:
+                self.slot_status_warning = True
+                _safe_log(
+                    self.logger,
+                    LogLevel.WARNING,
+                    LogEvent.ERROR,
+                    "slot state lookup failed",
+                )
                 outcomes.append(SlotState.FAULTY)
         return tuple(outcomes)
 

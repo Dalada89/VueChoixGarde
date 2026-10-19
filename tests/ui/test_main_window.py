@@ -12,11 +12,15 @@ from vuechoixgarde.bootstrap import create_runtime
 from vuechoixgarde.ui.main_window import MainWindow
 
 
-def _slot_key(*, auto_repeat: bool = False) -> QKeyEvent:
+def _slot_key(
+    *,
+    auto_repeat: bool = False,
+    modifiers: Qt.KeyboardModifier = Qt.KeyboardModifier.NoModifier,
+) -> QKeyEvent:
     return QKeyEvent(
         QEvent.Type.KeyPress,
         Qt.Key.Key_W,
-        Qt.KeyboardModifier.NoModifier,
+        modifiers,
         25,
         0,
         0,
@@ -72,6 +76,13 @@ def test_main_window_opens_displays_navigates_and_shuts_down(qtbot: QtBot, tmp_p
     )
     qtbot.keyClick(window, Qt.Key.Key_Right)
     qtbot.waitUntil(lambda: "end of the image list" in window.statusBar().currentMessage())
+    qtbot.keyClick(window, Qt.Key.Key_Left)
+    qtbot.waitUntil(
+        lambda: window.view is not None and window.view.snapshot.current_name == "IMG_1.png",
+        timeout=5000,
+    )
+    qtbot.keyClick(window, Qt.Key.Key_Left)
+    qtbot.waitUntil(lambda: "beginning of the image list" in window.statusBar().currentMessage())
 
     window.close()
     qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
@@ -90,6 +101,10 @@ def test_slot_key_prompts_validates_toggles_and_modified_confirmation_defaults_t
     window.show()
     window._open_folder(source)
     qtbot.waitUntil(lambda: window.view is not None, timeout=5000)
+    QApplication.sendEvent(
+        window,
+        _slot_key(modifiers=Qt.KeyboardModifier.ControlModifier),
+    )
     QApplication.sendEvent(window, _slot_key(auto_repeat=True))
     qtbot.wait(50)
     assert not (source / "Sorted").exists()

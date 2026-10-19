@@ -262,6 +262,49 @@ class SQLiteStateStore:
                 StateStoreErrorReason.IO_ERROR, path=self.path, detail=str(error)
             ) from error
 
+    def list_profiles(self) -> tuple[ProfileRecord, ...]:
+        """Return all profiles in creation order."""
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT * FROM profiles ORDER BY created_at, id"
+                ).fetchall()
+                return tuple(self._read_profile(connection, row) for row in rows)
+        except sqlite3.Error as error:
+            raise StateStoreError(
+                StateStoreErrorReason.IO_ERROR, path=self.path, detail=str(error)
+            ) from error
+
+    def delete_profile(self, profile_id: str) -> None:
+        """Delete profile metadata and register rows without touching source/destination files."""
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                profile = connection.execute(
+                    "SELECT 1 FROM profiles WHERE id = ?", (profile_id,)
+                ).fetchone()
+                if profile is None:
+                    raise StateStoreError(
+                        StateStoreErrorReason.PROFILE_NOT_FOUND, detail=profile_id
+                    )
+                pending = connection.execute(
+                    "SELECT 1 FROM operations WHERE profile_id = ? AND state = 'started' LIMIT 1",
+                    (profile_id,),
+                ).fetchone()
+                if pending is not None:
+                    raise StateStoreError(
+                        StateStoreErrorReason.INVALID_DATA,
+                        detail="profile has unfinished recovery entries",
+                    )
+                connection.execute("DELETE FROM operations WHERE profile_id = ?", (profile_id,))
+                connection.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+        except StateStoreError:
+            raise
+        except sqlite3.Error as error:
+            raise StateStoreError(
+                StateStoreErrorReason.IO_ERROR, path=self.path, detail=str(error)
+            ) from error
+
     def create_profile_from_template(
         self, folder_identity: str, display_path: str, slots: Sequence[Slot]
     ) -> ProfileRecord:
@@ -336,8 +379,10 @@ class SQLiteStateStore:
         profile_id: str,
         folder_identity: str,
         display_path: str,
+        *,
+        replace_profile_id: str | None = None,
     ) -> ProfileRecord:
-        """Reassign a profile and its register paths in one transaction (FR-042)."""
+        """Reassign profile identity and register paths in one transaction (FR-042)."""
         timestamp = self._timestamp()
         try:
             with self._connect() as connection:
@@ -348,6 +393,36 @@ class SQLiteStateStore:
                 if profile is None:
                     raise StateStoreError(
                         StateStoreErrorReason.PROFILE_NOT_FOUND, detail=profile_id
+                    )
+                target = connection.execute(
+                    "SELECT id FROM profiles WHERE folder_identity = ?", (folder_identity,)
+                ).fetchone()
+                if target is not None and target["id"] != profile_id:
+                    if target["id"] != replace_profile_id:
+                        raise StateStoreError(
+                            StateStoreErrorReason.INVALID_DATA,
+                            detail="target folder already has a profile",
+                        )
+                    target_id = target["id"]
+                    has_copies = connection.execute(
+                        "SELECT 1 FROM copies WHERE profile_id = ? LIMIT 1", (target_id,)
+                    ).fetchone()
+                    has_pending = connection.execute(
+                        "SELECT 1 FROM operations WHERE profile_id = ? "
+                        "AND state = 'started' LIMIT 1",
+                        (target_id,),
+                    ).fetchone()
+                    if has_copies is not None or has_pending is not None:
+                        raise StateStoreError(
+                            StateStoreErrorReason.INVALID_DATA,
+                            detail="target profile contains register or recovery data",
+                        )
+                    connection.execute("DELETE FROM operations WHERE profile_id = ?", (target_id,))
+                    connection.execute("DELETE FROM profiles WHERE id = ?", (target_id,))
+                elif replace_profile_id is not None:
+                    raise StateStoreError(
+                        StateStoreErrorReason.INVALID_DATA,
+                        detail="replacement profile is not assigned to the target folder",
                     )
                 old_root = Path(profile["folder_identity"])
                 new_root = Path(folder_identity)

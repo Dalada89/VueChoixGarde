@@ -230,3 +230,10 @@ Phase 5 imaging, worker infrastructure, bootstrap, and a minimal functional main
 - Manual physical-key validation remains open on Linux X11 and Wayland, Windows, and macOS; the automated Qt tests do not replace those hardware/layout checks.
 - Validate real HEIC/HEIF images and bundled licensing/wheel support on release platforms. Only the unavailable-plugin path is automated so far.
 - Settings and profile editing, DE/EN/FR catalogs, Help/F1, sound, final visual/contrast review, packaging/CI and additional profile workflows remain Phase 6 scope.
+
+## 13. Phase 6 settings and profiles results
+
+- Implemented settings/profile workflows, persisted profile listing/deletion and transactional reassignment, General/Slots/Profiles settings UI, async slot-status warnings, bounded screen-based image decode sizing, localization and dark-theme styling. The settings slot-color sample now uses an explicit inline background style so the stylesheet palette cannot hide the configured color; a rendered-pixel regression test covers this behavior.
+- Phase 6 automated verification: `uv run ruff check` passed; `uv run ruff format --check` passed (107 files); `uv run pyright` passed (0 errors, warnings or informations); `uv run pytest -q` passed (324 passed, 1 skipped; Windows-only extended-length path test skipped on Linux).
+- Removed `.phase6-smoke` generated previews and test data after verification. The remaining tracked/untracked Phase 6 implementation files are intentionally left in the working tree; no commit was created.
+- Slot stripe color rendering is styled by `QFrame#slotStripe` in `src/vuechoixgarde/resources/dark.qss`; verify custom stripe colors visually if that code path changes. Runtime/cross-platform manual checks remain as documented above.

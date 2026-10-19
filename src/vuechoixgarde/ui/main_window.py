@@ -2,11 +2,21 @@
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast, override
+from typing import TypeVar, cast, override
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QCloseEvent, QFontMetrics, QImage, QKeyEvent, QPixmap, QResizeEvent
+from PySide6.QtGui import (
+    QCloseEvent,
+    QFontMetrics,
+    QImage,
+    QKeyEvent,
+    QKeySequence,
+    QPixmap,
+    QResizeEvent,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -24,21 +34,29 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from vuechoixgarde.app.results import SessionSnapshot, SlotState, UseCaseStatus
+from vuechoixgarde.app.results import SlotState, UseCaseStatus
+from vuechoixgarde.app.service import ProfileSummary, SessionView, SlotStatusResult
 from vuechoixgarde.app.toggle import TogglePlan, ToggleResult
-from vuechoixgarde.bootstrap import Runtime, SessionView
+from vuechoixgarde.bootstrap import Runtime
 from vuechoixgarde.core.comparison import comparison_key
 from vuechoixgarde.core.folder_names import FolderNameError, validate_folder_name
-from vuechoixgarde.core.keys import displayed_key_label
+from vuechoixgarde.core.keys import displayed_key_label, update_learned_key_labels
 from vuechoixgarde.core.navigation import NavigationDirection
+from vuechoixgarde.core.slots import Slot
 from vuechoixgarde.core.sorting import sort_names
 from vuechoixgarde.imaging.cache import DecodedImageCache
+from vuechoixgarde.imaging.size import screen_decode_bounds
 from vuechoixgarde.ports.errors import ImageDecodeError, ImageDecodeErrorReason
-from vuechoixgarde.ports.imaging import DecodedImage, ImageDecoder
+from vuechoixgarde.ports.imaging import DecodedImage
 from vuechoixgarde.ports.log import LogEvent, LogLevel
+from vuechoixgarde.ports.models import Settings
 from vuechoixgarde.ui.keyboard import keyboard_event_data, main_window_key_filter_enabled
+from vuechoixgarde.ui.settings_dialog import SettingsDialog
 from vuechoixgarde.ui.texts import text
 from vuechoixgarde.ui.workers import WorkerPools
+
+_Result = TypeVar("_Result")
+
 
 _STATE_PRESENTATION = {
     SlotState.NO_DESTINATION: ("○", "state_none"),
@@ -79,6 +97,10 @@ class MainWindow(QMainWindow):
         self.view: SessionView | None = None
         self._pending_operations = 0
         self._slot_operation_pending = False
+        self._slot_status_in_flight = False
+        self._slot_status_requested: SessionView | None = None
+        self._navigation_in_flight = False
+        self._queued_navigation: list[NavigationDirection] = []
         self._closing = False
         self._ready_to_close = False
         self._shutdown_started = False
@@ -88,6 +110,10 @@ class MainWindow(QMainWindow):
         self._close_busy_timer.setInterval(1000)
         self._close_busy_timer.timeout.connect(lambda: self.busy_label.show())
         self._build_ui()
+        self.settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
+        self.settings_shortcut.activated.connect(
+            lambda: self._open_settings() if main_window_key_filter_enabled() else None
+        )
         self.setWindowTitle(text("app_title"))
         self.resize(1100, 760)
         stylesheet = Path(__file__).parents[1] / "resources" / "dark.qss"
@@ -125,7 +151,7 @@ class MainWindow(QMainWindow):
         )
         top.addWidget(self.reconcile_button)
         self.settings_button = QPushButton(text("settings"))
-        self.settings_button.setEnabled(False)
+        self.settings_button.clicked.connect(self._open_settings)
         top.addWidget(self.settings_button)
         self.help_button = QPushButton(text("help"))
         self.help_button.setEnabled(False)
@@ -147,7 +173,7 @@ class MainWindow(QMainWindow):
         )
         info.addWidget(self.filename_label, 1)
         self.star_label = QLabel("★")
-        self.star_label.setAccessibleName("Selected in a destination")
+        self.star_label.setAccessibleName(text("selected_accessible"))
         self.star_label.hide()
         info.addWidget(self.star_label)
         self.selected_label = QLabel(text("selected_count", count=0))
@@ -169,7 +195,7 @@ class MainWindow(QMainWindow):
         self.slot_layout.setVerticalSpacing(6)
         layout.addWidget(self.slot_panel)
         self.busy_label = QLabel(text("busy"))
-        self.busy_label.setStyleSheet("color: #F2D06B; font-weight: bold;")
+        self.busy_label.setObjectName("busyLabel")
         self.busy_label.hide()
         layout.addWidget(self.busy_label)
         self.setCentralWidget(root)
@@ -187,17 +213,107 @@ class MainWindow(QMainWindow):
     def _open_folder(self, path: Path) -> None:
         self._run_file(lambda: self.runtime.service.open_folder(path))
 
+    def _open_settings(self) -> None:
+        if self._pending_operations or self._slot_operation_pending:
+            self.statusBar().showMessage(text("settings_busy"), 2500)
+            return
+        if self.runtime.register_available:
+            self._run_file(self.runtime.service.profile_catalog, self._show_settings)
+        else:
+            self._show_settings((), None)
+
+    def _show_settings(self, profiles: tuple[ProfileSummary, ...], error: Exception | None) -> None:
+        if error is not None:
+            self._show_error(error)
+            return
+        current_profile = (
+            self.view.snapshot.profile
+            if self.runtime.register_available and self.view is not None
+            else None
+        )
+        dialog: SettingsDialog
+
+        def save_preferences(
+            reopen: bool,
+            direction: str,
+            target: str,
+            typed_slots: tuple[Slot, ...],
+            learned_labels: tuple[tuple[str, str], ...],
+        ) -> None:
+            def save() -> tuple[SessionView | None, Settings]:
+                template = typed_slots if target == "template" else None
+                self.runtime.service.save_preferences(
+                    reopen_last_folder=reopen,
+                    sort_direction=direction,
+                    global_slot_template=template,
+                    learned_key_labels=learned_labels,
+                )
+                if target == "profile":
+                    self.runtime.service.save_profile_slots(typed_slots)
+                return self.runtime.service.current_view(), self.runtime.service.settings
+
+            def saved(value: tuple[SessionView | None, object], _error: Exception | None) -> None:
+                view, _settings = value
+                if view is not None:
+                    self._apply_view(view)
+                dialog.accept()
+                self.statusBar().showMessage(text("settings_saved"), 2500)
+
+            self._run_file(save, saved)
+
+        def profile_action(action: str, profile_id: str | None) -> None:
+            def update() -> tuple[tuple[ProfileSummary, ...], SessionView | None]:
+                service = self.runtime.service
+                if action == "save_profile_as_template":
+                    service.save_profile_as_template()
+                elif action == "reset_global_template":
+                    service.reset_global_template()
+                elif action == "reset_current_profile":
+                    service.reset_profile_to_template()
+                elif action == "assign_orphan" and profile_id is not None:
+                    service.reassign_orphan(profile_id)
+                elif action == "delete_profile" and profile_id is not None:
+                    service.delete_profile(profile_id)
+                return service.profile_catalog(), service.current_view()
+
+            def updated(
+                value: tuple[tuple[ProfileSummary, ...], SessionView | None],
+                _error: Exception | None,
+            ) -> None:
+                updated_profiles, view = value
+                if view is not None:
+                    self._apply_view(view)
+                dialog.refresh_profiles(updated_profiles)
+                dialog.accept()
+                self.statusBar().showMessage(text("profile_action_done"), 3000)
+
+            self._run_file(update, updated)
+
+        dialog = SettingsDialog(
+            self.runtime.service.settings,
+            current_profile,
+            profiles,
+            self.runtime.log_directory,
+            read_only=not self.runtime.settings_writable,
+            on_save=save_preferences,
+            on_profile_action=profile_action,
+            parent=self,
+        )
+        dialog.exec()
+
     def _toggle_sort(self) -> None:
         if self.view is None:
             return
-        descending = not cast(SessionSnapshot, self.view.snapshot).descending
+        descending = not self.view.snapshot.descending
         self._run_file(lambda: self.runtime.service.set_sort_direction(descending))
 
-    def _run_file(self, function: object, callback: object | None = None) -> None:
+    def _run_file(
+        self,
+        function: Callable[[], _Result],
+        callback: Callable[[_Result, Exception | None], None] | None = None,
+    ) -> None:
         if self._closing:
             return
-        operation = cast(Callable[[], object], function)
-        on_done = cast(Callable[[object, Exception | None], None] | None, callback)
         self._pending_operations += 1
         self.busy_label.hide()
         self._close_busy_timer.start()
@@ -216,14 +332,14 @@ class MainWindow(QMainWindow):
                 return
             if isinstance(result, SessionView):
                 self._apply_view(result)
-            if on_done is not None:
-                on_done(result, error)
+            if callback is not None:
+                callback(cast(_Result, result), error)
 
-        self.workers.file_operations.submit(operation, finished)
+        self.workers.file_operations.submit(cast(Callable[[], object], function), finished)
 
     def _apply_view(self, view: SessionView) -> None:
         self.view = view
-        snapshot = cast(SessionSnapshot, view.snapshot)
+        snapshot = view.snapshot
         self._set_open_state(True)
         self.profile_label.setText(Path(snapshot.source_path).name or snapshot.source_path)
         self.profile_label.setToolTip(text("source_folder", path=snapshot.source_path))
@@ -265,7 +381,64 @@ class MainWindow(QMainWindow):
                 else "previous_boundary"
             )
             self.statusBar().showMessage(text(cue), 1800)
+        if view.warning is not None:
+            self.statusBar().showMessage(text(view.warning), 5000)
         self._render_slots(view)
+        self._schedule_slot_status(view)
+
+    def _schedule_slot_status(self, view: SessionView) -> None:
+        self._slot_status_requested = view
+        if not self._slot_status_in_flight:
+            QTimer.singleShot(0, self._dispatch_slot_status)
+
+    def _dispatch_slot_status(self) -> None:
+        if self._closing or self._slot_status_in_flight or self._slot_status_requested is None:
+            return
+        view, self._slot_status_requested = self._slot_status_requested, None
+        if self.view is None or view.generation != self.view.generation:
+            return
+        self._slot_status_in_flight = True
+
+        def load() -> tuple[SlotStatusResult | None, str | None]:
+            try:
+                return (
+                    self.runtime.service.slot_status(view.snapshot.current_name, view.generation),
+                    None,
+                )
+            except Exception:
+                return None, "slot_status_failed"
+
+        self._run_file(load, self._slot_status_finished)
+
+    def _slot_status_finished(
+        self, value: tuple[SlotStatusResult | None, str | None], _error: Exception | None
+    ) -> None:
+        self._slot_status_in_flight = False
+        result, warning = value
+        view = self.view
+        if (
+            result is not None
+            and view is not None
+            and result.generation == view.generation
+            and result.image_name == view.snapshot.current_name
+            and len(result.slot_states) == len(view.snapshot.profile.slots)
+        ):
+            self.view = SessionView(
+                view.snapshot,
+                result.slot_states,
+                result.selected_image_count,
+                view.settings,
+                view.generation,
+                result.warning,
+            )
+            self.selected_label.setText(text("selected_count", count=result.selected_image_count))
+            self.star_label.setVisible(SlotState.SELECTED in result.slot_states)
+            self._render_slots(self.view)
+            warning = result.warning
+        if warning is not None:
+            self.statusBar().showMessage(text(warning), 5000)
+        if self._slot_status_requested is not None:
+            QTimer.singleShot(0, self._dispatch_slot_status)
 
     def _render_slots(self, view: SessionView) -> None:
         while self.slot_layout.count():
@@ -274,26 +447,27 @@ class MainWindow(QMainWindow):
                 widget = item.widget()
                 if widget is not None:
                     widget.deleteLater()
-        snapshot = cast(SessionSnapshot, view.snapshot)
+        snapshot = view.snapshot
         labels = dict(view.settings.learned_key_labels)
         for index, slot in enumerate(snapshot.profile.slots):
             container = QFrame()
             row = QHBoxLayout(container)
             row.setContentsMargins(4, 2, 4, 2)
             stripe = QFrame()
+            stripe.setObjectName("slotStripe")
             stripe.setFixedWidth(6)
-            stripe.setStyleSheet(f"background-color: {slot.color}; border-radius: 2px;")
+            stripe.setStyleSheet(f"background-color: {slot.color};")
             row.addWidget(stripe)
             key_label = displayed_key_label(slot.key_position, labels) or "?"
             key_widget = QLabel(key_label)
+            key_widget.setObjectName("keyLabel")
             key_widget.setMinimumWidth(24)
-            key_widget.setStyleSheet("font-weight: bold;")
             row.addWidget(key_widget)
             name_widget = QLabel(slot.destination_name or "—")
             name_widget.setMinimumWidth(56)
             name_widget.setToolTip(slot.destination_name or "")
             row.addWidget(name_widget, 1)
-            state = cast(SlotState, view.slot_states[index])
+            state = view.slot_states[index]
             symbol, label_key = _STATE_PRESENTATION[state]
             state_widget = QLabel(f"{symbol} {text(label_key)}")
             row.addWidget(state_widget)
@@ -303,7 +477,7 @@ class MainWindow(QMainWindow):
         self.slot_panel.setEnabled(slot_actions_enabled)
 
     def _request_neighborhood(self, view: SessionView) -> None:
-        snapshot = cast(SessionSnapshot, view.snapshot)
+        snapshot = view.snapshot
         current_name = snapshot.current_name
         if current_name is None:
             self.cache.clear()
@@ -326,9 +500,8 @@ class MainWindow(QMainWindow):
         else:
             self.image_label.setPixmap(QPixmap())
             self.image_label.setText(text("busy"))
-        decoder = cast(ImageDecoder, self.runtime.decoder)
-        max_width = max(1, self.image_label.width())
-        max_height = max(1, self.image_label.height())
+        decoder = self.runtime.decoder
+        max_width, max_height = self._decode_bounds()
         for path in paths:
             if self.cache.get(path) is not None:
                 continue
@@ -343,6 +516,19 @@ class MainWindow(QMainWindow):
                 ),
             )
 
+    def _decode_bounds(self) -> tuple[int, int]:
+        screens = QApplication.screens()
+        if not screens:
+            return screen_decode_bounds(
+                max(1, self.image_label.width()),
+                max(1, self.image_label.height()),
+                max(1.0, self.devicePixelRatioF()),
+            )
+        width = max(screen.geometry().width() for screen in screens)
+        height = max(screen.geometry().height() for screen in screens)
+        ratio = max(screen.devicePixelRatio() for screen in screens)
+        return screen_decode_bounds(width, height, ratio)
+
     def _decode_finished(
         self, path: Path, generation: int, result: object, error: Exception | None
     ) -> None:
@@ -350,7 +536,7 @@ class MainWindow(QMainWindow):
             return
         current = self.view.snapshot.current_name if self.view is not None else None
         current_path = (
-            Path(cast(SessionSnapshot, self.view.snapshot).source_path) / current
+            Path(self.view.snapshot.source_path) / current
             if self.view is not None and current is not None
             else None
         )
@@ -400,7 +586,7 @@ class MainWindow(QMainWindow):
         self._slot_operation_pending = True
         self._run_file(
             lambda: self.runtime.service.plan_slot(image_name, slot_index),
-            lambda result, _: self._handle_plan(cast(TogglePlan, result), image_name, slot_index),
+            lambda result, _: self._handle_plan(result, image_name, slot_index),
         )
 
     def _handle_plan(self, plan: TogglePlan, image_name: str, slot_index: int) -> None:
@@ -411,9 +597,7 @@ class MainWindow(QMainWindow):
                 return
             self._run_file(
                 lambda: self.runtime.service.name_slot_and_plan(image_name, slot_index, name),
-                lambda result, _: self._handle_plan(
-                    cast(TogglePlan, result), image_name, slot_index
-                ),
+                lambda result, _: self._handle_plan(result, image_name, slot_index),
             )
             return
         if plan.status is UseCaseStatus.MODIFIED_CONFIRMATION_REQUIRED:
@@ -428,9 +612,7 @@ class MainWindow(QMainWindow):
     def _run_execute(self, plan: TogglePlan, *, confirmed_modified: bool) -> None:
         self._run_file(
             lambda: self.runtime.service.execute_plan(plan, confirmed_modified=confirmed_modified),
-            lambda result, _: self._handle_toggle_result(
-                cast(tuple[ToggleResult, SessionView], result), plan
-            ),
+            lambda result, _: self._handle_toggle_result(result, plan),
         )
 
     def _handle_toggle_result(
@@ -442,7 +624,7 @@ class MainWindow(QMainWindow):
             self._ask_modified_confirmation(plan, names=result.conflict_names)
             return
         if result.status is UseCaseStatus.OK:
-            slot = cast(SessionSnapshot, view.snapshot).profile.slots[plan.slot_index]
+            slot = view.snapshot.profile.slots[plan.slot_index]
             key = (
                 displayed_key_label(slot.key_position, dict(view.settings.learned_key_labels))
                 or "?"
@@ -502,7 +684,7 @@ class MainWindow(QMainWindow):
         editor = QLineEdit(dialog)
         layout.addWidget(editor)
         validation = QLabel(dialog)
-        validation.setStyleSheet("color: #FF8A80;")
+        validation.setObjectName("validationMessage")
         layout.addWidget(validation)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
@@ -563,6 +745,29 @@ class MainWindow(QMainWindow):
         box.setDetailedText(str(error))
         box.exec()
 
+    def _queue_navigation(self, direction: NavigationDirection) -> None:
+        self._last_direction = direction
+        if self._navigation_in_flight:
+            self._queued_navigation.append(direction)
+            return
+        self._navigation_in_flight = True
+        self._run_file(
+            lambda: self.runtime.service.navigate(direction),
+            self._navigation_finished,
+        )
+
+    def _navigation_finished(self, _view: SessionView, _error: Exception | None) -> None:
+        self._navigation_in_flight = False
+        if not self._queued_navigation or self._closing:
+            return
+        directions = tuple(self._queued_navigation)
+        self._queued_navigation.clear()
+        self._navigation_in_flight = True
+        self._run_file(
+            lambda: self.runtime.service.navigate_batch(directions),
+            self._navigation_finished,
+        )
+
     @override
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if not main_window_key_filter_enabled():
@@ -578,8 +783,7 @@ class MainWindow(QMainWindow):
                 if event.key() == Qt.Key.Key_Right
                 else NavigationDirection.PREVIOUS
             )
-            self._last_direction = direction
-            self._run_file(lambda: self.runtime.service.navigate(direction))
+            self._queue_navigation(direction)
             event.accept()
             return
         if event.key() == Qt.Key.Key_F5 and not event.modifiers() and self.view is not None:
@@ -588,21 +792,26 @@ class MainWindow(QMainWindow):
             return
         event_data = keyboard_event_data(event)
         if event_data.position is not None and event_data.triggers_slot:
-            if self.runtime.settings_writable:
-                self._run_file(
-                    lambda: self.runtime.service.learn_key(
-                        event_data.position or "", event_data.text, modifier_active=False
-                    )
+            if self.runtime.settings_writable and self.view is not None:
+                labels = dict(self.view.settings.learned_key_labels)
+                updated_labels = update_learned_key_labels(
+                    labels, event_data.position, event_data.text, modifier_active=False
                 )
+                if dict(updated_labels) != labels:
+                    self._run_file(
+                        lambda: self.runtime.service.learn_key(
+                            event_data.position or "",
+                            event_data.text,
+                            modifier_active=False,
+                        ),
+                        lambda view, _error: self._apply_view(view) if view is not None else None,
+                    )
             if self.view is not None:
-                for index, slot in enumerate(
-                    cast(SessionSnapshot, self.view.snapshot).profile.slots
-                ):
+                for index, slot in enumerate(self.view.snapshot.profile.slots):
                     if slot.key_position == event_data.position:
-                        if cast(SessionSnapshot, self.view.snapshot).current_name is not None:
-                            self._slot_pressed(
-                                index, cast(SessionSnapshot, self.view.snapshot).current_name or ""
-                            )
+                        current_name = self.view.snapshot.current_name
+                        if current_name is not None:
+                            self._slot_pressed(index, current_name)
                         break
             event.accept()
             return
@@ -611,11 +820,8 @@ class MainWindow(QMainWindow):
     @override
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        if (
-            self.view is not None
-            and cast(SessionSnapshot, self.view.snapshot).current_name is not None
-        ):
-            snapshot = cast(SessionSnapshot, self.view.snapshot)
+        if self.view is not None and self.view.snapshot.current_name is not None:
+            snapshot = self.view.snapshot
             path = Path(snapshot.source_path) / (snapshot.current_name or "")
             image = self.cache.get(path)
             if image is not None:
