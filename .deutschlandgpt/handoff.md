@@ -262,3 +262,11 @@ Measured sound-enabled bundle: 239M on disk / 248,502,211 bytes across 426 files
 **Decision required:** the Multimedia FFmpeg plugin links to QtQml, QtQuick and QtNetwork. A probe copy with QtQml/QtQuick and the FFmpeg `ssl`/`crypto` stubs removed reported no QtMultimedia backend, so filtering those native files would leave the application without its bundled sound backend. The binding modules for QML/Quick remain excluded, but their native libraries are in the current bundle. Confirm whether these additional runtime dependencies (about 16 MiB for QML/Quick, plus small FFmpeg stubs) may be allowed alongside QtNetwork, or whether the sound implementation should change. Until resolved, the bundle checker intentionally fails and Phase 8 packaging is not accepted.
 
 Windows/macOS builds and CI release workflows remain unrun locally; real hardware keyboard/HEIC checks and the outstanding Phase 7 UI review items remain open. No commit, tag or push was created.
+
+## 16. Pfeiltasten-Navigation bei fokussierten Bedienelementen
+
+- Ursache: Links/Rechts wurden nur im `MainWindow.keyPressEvent()` für direkt dort eintreffende Tastendrücke behandelt. Mit Fokus auf einem Button verarbeitet Qt die Tasten vorher für die Fokusnavigation. Der bisherige Hauptfenster-Test sendete seine Tasten direkt an das Fenster und hatte diesen Fall nicht abgedeckt.
+- Fix: `MainWindow` installiert einen Anwendungs-Eventfilter, der unveränderte Links/Rechts-Tastendrücke nur für Widgets des eigenen Fensters vor Qt abfängt und über die bestehende asynchrone Bildnavigation leitet. Die vorhandene Schutzlogik für Dialoge, Popups und Texteingaben bleibt aktiv.
+- Regressionstests prüfen Navigation und erhaltenen Button-Fokus sowie keine Hauptfenster-Navigation bei Pfeiltasten in einem Dialog-Textfeld.
+- Verifikation: gezielte UI-Regressionstests 2/2 bestanden; Ruff format check (135 Dateien) und Ruff check bestanden; Pyright ohne Diagnosen; `pytest` 354 bestanden, 1 übersprungen (Windows-spezifischer Extended-Path-Test auf Linux). `git diff --check` bestanden.
+- Manuelle Prüfung mit realer Tastatur und plattformübergreifende Tastaturvalidierung bleiben wie zuvor offen. Kein Commit erstellt.

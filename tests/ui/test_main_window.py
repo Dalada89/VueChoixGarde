@@ -68,22 +68,57 @@ def test_main_window_opens_displays_navigates_and_shuts_down(qtbot: QtBot, tmp_p
     )
     assert window.filename_label.toolTip() == "IMG_1.png"
     assert window.progress_text.text() == "1 of 2"
+    window.open_button.setFocus()
+    qtbot.waitUntil(window.open_button.hasFocus)
 
-    qtbot.keyClick(window, Qt.Key.Key_Right)
+    qtbot.keyClick(window.open_button, Qt.Key.Key_Right)
     qtbot.waitUntil(
         lambda: window.view is not None and window.view.snapshot.current_name == "IMG_2.png",
         timeout=5000,
     )
-    qtbot.keyClick(window, Qt.Key.Key_Right)
+    assert QApplication.focusWidget() is window.open_button
+    qtbot.keyClick(window.open_button, Qt.Key.Key_Right)
     qtbot.waitUntil(lambda: "end of the image list" in window.statusBar().currentMessage())
-    qtbot.keyClick(window, Qt.Key.Key_Left)
+    qtbot.keyClick(window.open_button, Qt.Key.Key_Left)
     qtbot.waitUntil(
         lambda: window.view is not None and window.view.snapshot.current_name == "IMG_1.png",
         timeout=5000,
     )
-    qtbot.keyClick(window, Qt.Key.Key_Left)
+    qtbot.keyClick(window.open_button, Qt.Key.Key_Left)
     qtbot.waitUntil(lambda: "beginning of the image list" in window.statusBar().currentMessage())
 
+    window.close()
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
+
+
+def test_arrow_key_in_dialog_editor_does_not_navigate_main_window(
+    qtbot: QtBot, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    Image.new("RGB", (12, 8), "red").save(source / "IMG_1.png")
+    Image.new("RGB", (12, 8), "blue").save(source / "IMG_2.png")
+    runtime = create_runtime(tmp_path / "app-data")
+    window = MainWindow(runtime)
+    qtbot.addWidget(window)
+    window.show()
+    window._open_folder(source)
+    qtbot.waitUntil(lambda: window.view is not None, timeout=5000)
+
+    dialog = QDialog(window)
+    editor = QLineEdit(dialog)
+    editor.resize(240, 32)
+    dialog.resize(280, 80)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    editor.setFocus()
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is editor)
+    qtbot.keyClick(editor, Qt.Key.Key_Right)
+    qtbot.wait(100)
+
+    assert window.view is not None
+    assert window.view.snapshot.current_name == "IMG_1.png"
+    dialog.close()
     window.close()
     qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
 

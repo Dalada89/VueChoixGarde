@@ -5,7 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar, cast, override
 
-from PySide6.QtCore import QCoreApplication, QLibraryInfo, Qt, QTimer, QTranslator
+from PySide6.QtCore import QCoreApplication, QEvent, QLibraryInfo, QObject, Qt, QTimer, QTranslator
 from PySide6.QtGui import (
     QCloseEvent,
     QFontMetrics,
@@ -151,6 +151,9 @@ class MainWindow(QMainWindow):
         self._close_busy_timer.setInterval(1000)
         self._close_busy_timer.timeout.connect(lambda: self.busy_label.show())
         self._build_ui()
+        application = QApplication.instance()
+        if application is not None:
+            application.installEventFilter(self)
         self._load_qt_translation(runtime.settings.language)
         self.settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
         self.settings_shortcut.activated.connect(
@@ -949,6 +952,28 @@ class MainWindow(QMainWindow):
             lambda: self.runtime.service.navigate_batch(directions),
             self._navigation_finished,
         )
+
+    @override
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if (
+            isinstance(watched, QWidget)
+            and (watched is self or self.isAncestorOf(watched))
+            and isinstance(event, QKeyEvent)
+            and event.type() == QEvent.Type.KeyPress
+            and event.key() in (Qt.Key.Key_Right, Qt.Key.Key_Left)
+            and not event.modifiers()
+            and self.view is not None
+            and main_window_key_filter_enabled()
+        ):
+            direction = (
+                NavigationDirection.NEXT
+                if event.key() == Qt.Key.Key_Right
+                else NavigationDirection.PREVIOUS
+            )
+            self._queue_navigation(direction)
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
 
     @override
     def keyPressEvent(self, event: QKeyEvent) -> None:
