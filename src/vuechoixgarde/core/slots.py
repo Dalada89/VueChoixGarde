@@ -46,7 +46,7 @@ class ProfileIssue:
 
 
 DEFAULT_SLOTS = (
-    Slot("KeyW", None, "#E57373"),
+    Slot("KeyW", None, "#FF9A9A"),
     Slot("KeyA", None, "#64B5F6"),
     Slot("KeyS", None, "#81C784"),
     Slot("KeyD", None, "#FFD54F"),

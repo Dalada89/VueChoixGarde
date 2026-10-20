@@ -1,6 +1,6 @@
 # Handoff – VueChoixGarde
 
-Status: Phase 4 (`app` use cases and orchestration, `applog`, and FR-070 metadata reconciliation) implemented and verified; 284 tests passed and one Windows-only test was skipped on Linux. Phase 2 manual cross-platform keyboard validation remains pending. No commit was created.
+Status: Phase 8 packaging/CI/release documentation is in progress. Latest Linux checks: Ruff format/check and Pyright pass; pytest reports 347 passed and 1 Windows-only skip. The QtNetwork binding is now bundled as a QtMultimedia dependency and the packaged smoke test passes, but the bundle scan still rejects QtQml/QtQuick native dependencies; product-owner approval is needed before relaxing those exclusions. Phase 7 manual/platform validation remains open. No commit was created.
 Zweck: Fortsetzung der Arbeit auf einem anderen Rechner bzw. in einer neuen Sitzung.
 
 ## 1. Ziel des Projekts
@@ -249,4 +249,16 @@ Implemented so far:
 
 Verification so far: `uv sync --locked`, Ruff format/check, Pyright, and pytest passed (330 passed, 1 skipped; Windows-only path test skipped on Linux). Catalog key/placeholder parity and literal `text()` references have automated checks. uv_build wheel inspection confirmed catalogs and sound resources are included. The combined settings/profile save has a Qt-free failure test for the explicit partial-save outcome.
 
-Still open before Phase 7 can be considered complete: translation coverage for all strings (catalog parity currently verifies structure, not translation quality); fully retranslate all existing widgets and dialogs on language switch; sound backend error logging and fake-player status tests; color contrast matrix for all theme states and slot palettes; accessible names for every control, slot tiles, image and progress; check 12-slot layout/minimum window size and long-name eliding/tooltips; dedicated tests for Help content/F1 guard, language live switch, sound gating, and errors during combined save; offscreen visual review in DE/EN/FR; hand-validate keyboard layouts and real HEIC. Phase 8 remains packaging/CI, release documentation and cross-platform checks.
+Still open before Phase 7 can be considered complete: translation quality review; comprehensive retranslation of existing widgets/dialogs; remaining sound/accessibility test gaps; offscreen visual review in DE/EN/FR; hand-validate keyboard layouts and real HEIC. Phase 8 has the QtNetwork follow-up status recorded in Section 15; package-scan approval and cross-platform release CI remain pending.
+
+## 15. Phase 8 QtNetwork packaging follow-up
+
+The user selected the plan in `.deutschlandgpt/plans/phase-8-qtnetwork-multimedia-dependency.md`: retain sound and allow QtNetwork only as a QtMultimedia dependency. NFR-005 remains unchanged. Added the hidden import, removed the PyInstaller binding exclusion, added the QtNetwork-dependent bundle allow rule, TLS/network/x265 checks, an AST network-import test, and an explicit `SoundPlayer` instantiation in the packaged smoke test. Added ADR 0002 and updated the packaging docs/notices generator.
+
+Linux verification (Python 3.13, PyInstaller 6.22.3, x86_64): `uv sync --locked --group build` passed; PyInstaller build completed with exit 0; packaged `--smoke-test` passed with exit 0. Ruff format check (134 files), Ruff check, Pyright (0 diagnostics), and full pytest passed (353 passed, 1 skipped; Windows extended-path test skipped). The bundle scan now identifies only QtQml/QtQuick native libraries as remaining failures; it no longer mistakes `x265_version`/FFmpeg codec-name text for an x265 encoder. No post-fix build has been repeated; the recorded build is the build completed after the QtNetwork spec change.
+
+Measured sound-enabled bundle: 239M on disk / 248,502,211 bytes across 426 files (about 237 MiB). `libQt6Network.so.6`: 2,153,672 bytes; `libQt6Multimedia.so.6`: 2,048,080 bytes; QtQml native libraries: 8,354,896 bytes; QtQuick: 8,393,168 bytes; FFmpeg multimedia plugin: 855,376 bytes; the five bundled FFmpeg codec libraries total 20.3 MB. No `libssl`, `libcrypto`, or Qt TLS plugin path was found; Qt FFmpeg `ssl`/`crypto` stub libraries are present.
+
+**Decision required:** the Multimedia FFmpeg plugin links to QtQml, QtQuick and QtNetwork. A probe copy with QtQml/QtQuick and the FFmpeg `ssl`/`crypto` stubs removed reported no QtMultimedia backend, so filtering those native files would leave the application without its bundled sound backend. The binding modules for QML/Quick remain excluded, but their native libraries are in the current bundle. Confirm whether these additional runtime dependencies (about 16 MiB for QML/Quick, plus small FFmpeg stubs) may be allowed alongside QtNetwork, or whether the sound implementation should change. Until resolved, the bundle checker intentionally fails and Phase 8 packaging is not accepted.
+
+Windows/macOS builds and CI release workflows remain unrun locally; real hardware keyboard/HEIC checks and the outstanding Phase 7 UI review items remain open. No commit, tag or push was created.

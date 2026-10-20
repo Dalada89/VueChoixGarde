@@ -56,7 +56,7 @@
   "profile_action_failed": "The profile change failed. No image files were changed.",
   "profile_action_done": "Profile change completed.",
   "help": "Help",
-  "help_shortcuts": "→ / ←: next / previous image\\nF1: help\\nF5: refresh\\nEsc: close this dialog\\nCtrl+,: settings\\nCtrl+O: open a source folder",
+  "help_shortcuts": "→ / ←: next / previous image\nF1: help\nF5: refresh\nEsc: close this dialog\nCtrl+,: settings\nCtrl+O: open a source folder",
   "help_behavior": "A slot key adds or removes a copy. Source files are never changed. Modified copies require confirmation. On non-US layouts, press each key once so its label is learned; a dead key may briefly learn a composed character. Open the log folder from Settings → General.",
   "help_slot_accessible": "Slot {key}, destination {name}",
   "no_name": "No name",

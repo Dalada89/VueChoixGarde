@@ -1,10 +1,11 @@
 """Minimal keyboard-driven Qt main window for image review and safe slot toggling."""
 
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar, cast, override
 
-from PySide6.QtCore import QLibraryInfo, Qt, QTimer, QTranslator
+from PySide6.QtCore import QCoreApplication, QLibraryInfo, Qt, QTimer, QTranslator
 from PySide6.QtGui import (
     QCloseEvent,
     QFontMetrics,
@@ -81,6 +82,37 @@ _DECODE_TEXT = {
     ImageDecodeErrorReason.TOO_LARGE: "decode_too_large",
     ImageDecodeErrorReason.HEIC_UNAVAILABLE: "decode_heic_unavailable",
 }
+
+
+class _ElidingLabel(QLabel):
+    """Display an elided slot name while retaining full accessible and tooltip text."""
+
+    def __init__(self, value: str) -> None:
+        super().__init__()
+        self._full_text = ""
+        self.setFullText(value)
+
+    def setFullText(self, value: str) -> None:  # noqa: N802
+        self._full_text = value
+        self.setAccessibleName(value)
+        self.setToolTip(value)
+        self._update_elided_text()
+
+    @override
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_elided_text()
+
+    def _update_elided_text(self) -> None:
+        self.setText(
+            QFontMetrics(self.font()).elidedText(
+                self._full_text,
+                Qt.TextElideMode.ElideMiddle,
+                max(0, self.contentsRect().width()),
+            )
+        )
+
+
 _NAME_ERROR_TEXT = {
     FolderNameError.EMPTY: "name_empty",
     FolderNameError.ONLY_SPACES_AND_DOTS: "name_spaces_dots",
@@ -129,6 +161,7 @@ class MainWindow(QMainWindow):
             lambda: self._choose_folder() if main_window_key_filter_enabled() else None
         )
         self.setWindowTitle(text("app_title"))
+        self.setMinimumSize(1000, 650)
         self.resize(1100, 760)
         stylesheet = Path(__file__).parents[1] / "resources" / "dark.qss"
         if stylesheet.exists():
@@ -215,6 +248,16 @@ class MainWindow(QMainWindow):
         self.busy_label.hide()
         layout.addWidget(self.busy_label)
         self.setCentralWidget(root)
+        self.profile_label.setAccessibleName(text("current_profile"))
+        self.open_button.setAccessibleName(text("open_folder"))
+        self.sort_button.setAccessibleName(text("sort_ascending"))
+        self.refresh_button.setAccessibleName(text("refresh"))
+        self.reconcile_button.setAccessibleName(text("reconcile"))
+        self.settings_button.setAccessibleName(text("settings"))
+        self.help_button.setAccessibleName(text("help"))
+        self.filename_label.setAccessibleName(text("filename"))
+        self.selected_label.setAccessibleName(text("selected_count", count=0))
+        self.progress_text.setAccessibleName(text("progress", current=0, total=0))
 
     def _set_open_state(self, opened: bool) -> None:
         self.sort_button.setEnabled(opened)
@@ -225,13 +268,30 @@ class MainWindow(QMainWindow):
         application = QApplication.instance()
         if application is None:
             return
-        if hasattr(self, "_qt_translator"):
-            application.removeTranslator(self._qt_translator)
-        translator = QTranslator(self)
-        directory = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
-        if translator.load(f"qtbase_{language}", directory):
-            application.installTranslator(translator)
-            self._qt_translator = translator
+        translator = getattr(self, "_qt_translator", None)
+        if translator is not None:
+            application.removeTranslator(translator)
+        self._qt_translator = None
+        if language == "en":
+            return
+        directories = [Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath))]
+        bundle_root = getattr(sys, "_MEIPASS", None)
+        if bundle_root is not None:
+            directories.extend(
+                (
+                    Path(bundle_root) / "PySide6" / "Qt" / "translations",
+                    Path(bundle_root) / "translations",
+                )
+            )
+        directories.append(
+            Path(QCoreApplication.applicationDirPath()) / "PySide6" / "Qt" / "translations"
+        )
+        for directory in directories:
+            translator = QTranslator(self)
+            if translator.load(f"qtbase_{language}", str(directory)):
+                application.installTranslator(translator)
+                self._qt_translator = translator
+                return
 
     def _retranslate(self) -> None:
         self.setWindowTitle(text("app_title"))
@@ -248,8 +308,32 @@ class MainWindow(QMainWindow):
         self.settings_button.setText(text("settings"))
         self.help_button.setText(text("help"))
         self.busy_label.setText(text("busy"))
+        self.profile_label.setAccessibleName(text("current_profile"))
+        self.open_button.setAccessibleName(text("open_folder"))
+        self.sort_button.setAccessibleName(self.sort_button.text())
+        self.refresh_button.setAccessibleName(text("refresh"))
+        self.reconcile_button.setAccessibleName(text("reconcile"))
+        self.settings_button.setAccessibleName(text("settings"))
+        self.help_button.setAccessibleName(text("help"))
+        self.star_label.setAccessibleName(text("selected_accessible"))
+        self.image_label.setAccessibleName(text("image_accessible"))
+        self.filename_label.setAccessibleName(text("filename"))
+        self.selected_label.setAccessibleName(text("selected_count", count=0))
+        self.progress_text.setAccessibleName(text("progress", current=0, total=0))
+        self.progress.setAccessibleName(text("progress_accessible"))
         if self.view is not None:
             self._apply_view(self.view)
+        else:
+            self.profile_label.setText(text("empty"))
+            self.profile_label.setToolTip("")
+            self.image_label.setPixmap(QPixmap())
+            self.image_label.setText(text("empty"))
+            self.filename_label.setText(text("filename"))
+            self.filename_label.setToolTip("")
+            self.selected_label.setText(text("selected_count", count=0))
+            self.progress_text.setText(text("progress", current=0, total=0))
+            self.progress.setValue(0)
+            self.star_label.hide()
 
     def _choose_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, text("open_dialog_title"))
@@ -470,6 +554,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(text(cue), 1800)
         if view.warning is not None:
             self.statusBar().showMessage(text(view.warning), 5000)
+        self.selected_label.setAccessibleName(self.selected_label.text())
+        self.progress_text.setAccessibleName(self.progress_text.text())
         self._render_slots(view)
         self._schedule_slot_status(view)
 
@@ -550,14 +636,15 @@ class MainWindow(QMainWindow):
             key_widget.setObjectName("keyLabel")
             key_widget.setMinimumWidth(24)
             row.addWidget(key_widget)
-            name_widget = QLabel(slot.destination_name or "—")
-            name_widget.setMinimumWidth(56)
-            name_widget.setToolTip(slot.destination_name or "")
+            name_widget = _ElidingLabel(slot.destination_name or "—")
+            name_widget.setObjectName("slotName")
+            name_widget.setMinimumWidth(0)
             row.addWidget(name_widget, 1)
             state = view.slot_states[index]
             symbol, label_key = _STATE_PRESENTATION[state]
             state_text = text(label_key)
             state_widget = QLabel(f"{symbol} {state_text}")
+            state_widget.setObjectName("slotState")
             state_widget.setAccessibleName(
                 text(
                     "slot_accessible",

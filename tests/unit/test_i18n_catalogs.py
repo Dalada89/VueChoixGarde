@@ -7,6 +7,7 @@ from vuechoixgarde.ui import texts
 
 _CATALOG_DIR = Path(texts.__file__).parents[1] / "i18n"
 _PLACEHOLDER = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+_UNTRANSLATED_ALLOWLIST = {"app_title", "ok", "profile_status", "slots_tab"}
 
 
 def _catalog(code: str) -> dict[str, str]:
@@ -24,8 +25,22 @@ def test_catalogs_have_same_keys_and_named_placeholders() -> None:
         assert set(_PLACEHOLDER.findall(catalogs["fr"][key])) == expected, key
 
 
-def test_catalog_keys_match_legacy_text_source() -> None:
-    assert set(_catalog("en")) == set(texts.TEXTS)
+def test_translations_do_not_repeat_english_without_allowlisting() -> None:
+    english = _catalog("en")
+    for language in ("de", "fr"):
+        untranslated = {
+            key
+            for key, value in _catalog(language).items()
+            if value == english[key] and key not in _UNTRANSLATED_ALLOWLIST
+        }
+        assert untranslated == set()
+
+
+def test_help_shortcuts_use_real_line_breaks() -> None:
+    for language in ("de", "en", "fr"):
+        shortcuts = _catalog(language)["help_shortcuts"]
+        assert "\n" in shortcuts
+        assert "\\n" not in shortcuts
 
 
 def test_literal_text_calls_resolve_in_english_catalog() -> None:

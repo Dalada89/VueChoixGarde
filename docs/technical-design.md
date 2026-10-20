@@ -423,26 +423,26 @@ PyInstaller in **one-folder** mode (not one-file): faster start, fewer false pos
 
 | Platform | Artifact | Build runner |
 |---|---|---|
-| Linux x86_64 | `.tar.gz` with the application folder | the oldest available Ubuntu runner (glibc compatibility) |
+| Linux x86_64 | `.tar.gz` with the application folder | Ubuntu 22.04 runner (Qt 6.12 wheels require glibc 2.34+) |
 | Windows x64 | `.zip` with the application folder | Windows runner |
-| macOS arm64 | `.app` in `.zip` or `.dmg` | macOS arm64 runner |
-| macOS x86_64 | `.app` in `.zip` or `.dmg` | Intel macOS runner, as long as GitHub provides one |
+| macOS arm64 | `.app` in `.zip` | Apple-silicon macOS 14 runner |
 
-QtWebEngine, QtQuick/QML and QtNetwork-dependent plugins not needed by the application are excluded to keep the package small.
+QtMultimedia is retained for optional WAV feedback. QtNetwork is bundled only because QtMultimedia imports it; application code never imports or uses it (enforced by Ruff TID251 and an AST test). Qt's TLS plugins and OpenSSL libraries are not shipped. The Linux Multimedia FFmpeg plugin also links to native QtQml/QtQuick libraries and Qt FFmpeg SSL/crypto stubs; a probe without them had no Multimedia backend. These transitive native dependencies remain pending product-owner approval. QtQml/QtQuick Python bindings, QtWebEngine, QtPdf, QtSvg, QtOpenGL and QtSql remain excluded. Release builds scan the bundle: unexplained network modules, TLS components and x265 fail the build.
 
 ### 12.3 Unsigned builds
 
-Releases are not signed (SRS 3.2). The user documentation explains per platform how to open them: Windows SmartScreen (“More info” → “Run anyway”), macOS Gatekeeper (right-click → “Open”, or remove the quarantine attribute), Linux (make the binary executable).
+Releases are unsigned and macOS builds are not notarized (SRS 3.2). User documentation explains Windows SmartScreen, macOS Gatekeeper approval in Privacy & Security, and Linux executable permissions. Release publication is a maintainer-reviewed GitHub draft; signing and publication remain manual.
 
 ### 12.4 Licenses
 
-- PySide6/Qt: LGPLv3 — dynamically linked, one-folder distribution, license texts and a source/relinking note included.
-- Pillow (MIT-CMU), `pi-heif` (BSD-3), bundled `libheif`/`libde265` (LGPLv3): license texts included in the release.
-- HEVC is covered by patents in some jurisdictions; this is listed as a risk (Section 14), not as legal advice.
+- PySide6/Qt and shiboken6: the selected LGPL-3.0-only terms are retained, with replaceable shared libraries in a one-folder distribution. Distribution metadata is copied into the bundle; consult the official [Qt licensing page](https://www.qt.io/licensing/open-source-lgpl-obligations) for full terms.
+- Pillow (MIT-CMU), `pi-heif` (BSD-3-Clause), `filelock` and `platformdirs`: release notices are generated from locked distribution metadata; bundled native `libheif`/`libde265` license texts are carried by the `pi-heif` distribution metadata where present.
+- The project license is MIT; dependency licenses remain unchanged. The release includes `LICENSE` and `THIRD_PARTY_NOTICES.md`.
+- HEVC patent rights may apply in some jurisdictions; this is listed as a risk (Section 14), not as legal advice.
 
 ### 12.5 Minimum OS versions (NFR-040)
 
-Determined by the Qt/PySide6 version used and documented with each release. Expected baseline for Qt 6.8 and later: Windows 10 (1809) / 11 x64, macOS 12 or later, Linux with glibc ≥ 2.28 and X11 or Wayland.
+The current packaging baseline is constrained by the PySide6/Qt 6.12 binary wheels: Windows 10 version 1809 or Windows 11 (x86_64), macOS 14.4 or later (Apple silicon arm64), and Linux x86_64 with glibc 2.34 or later. Qt platform/plugin dependencies and graphics/audio drivers must also be present. See the official [Qt 6.12 supported platforms](https://doc.qt.io/qt-6/supported-platforms.html) and [Linux glibc requirements](https://doc.qt.io/qt-6/linux.html). Verify these constraints against every release wheel and smoke test; they are not claims of manual OS acceptance.
 
 ## 13. Deviations from and interpretations of the SRS
 
@@ -466,7 +466,7 @@ Determined by the Qt/PySide6 version used and documented with each release. Expe
 | Large package and unsigned builds | Download size, warnings | One-folder build, excluded Qt modules, documentation (Section 12.3) |
 | Performance with 10,000 images and large JPEGs | Slow opening or navigation | Single-pass scan, `draft()` decoding, preload cache, background reconciliation with `mtime_ns` shortcut; measured against NFR-010/011 |
 
-## 15. Open points
+## 15. Resolved release decisions
 
-- Project license for the repository (must be compatible with LGPL components).
-- Confirm the macOS Intel build target.
+- The repository and application are MIT-licensed; dependency notices and terms are retained.
+- Release builds target macOS arm64 only. macOS Intel is not part of the V1 release matrix.
