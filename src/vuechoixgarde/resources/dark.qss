@@ -22,7 +22,9 @@ QLabel#keyLabel { font-weight: bold; }
 QFrame#slotEditorRow { background-color: #383838; border-radius: 4px; }
 QLabel#colorSample { background-color: palette(window); border: 1px solid #FFFFFF; border-radius: 3px; }
 QPushButton:disabled { color: #B0B0B0; border-color: #686868; }
-QPushButton:focus, QLineEdit:focus {
+QPushButton:focus, QLineEdit:focus, QComboBox:focus, QCheckBox:focus,
+QTableWidget:focus, QTabBar::tab:focus, QAbstractButton:focus, QProgressBar:focus {
+    outline: 2px solid #FFFFFF;
     border: 2px solid #FFFFFF;
 }
 QLineEdit {

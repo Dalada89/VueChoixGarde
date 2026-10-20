@@ -1,0 +1,1 @@
+added.wav is a short, quiet tone generated specifically for this project from a sine-wave formula; it contains no third-party material. The generated sound is dedicated to the public domain under CC0 1.0.

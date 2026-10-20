@@ -1,8 +1,8 @@
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
+from PySide6.QtGui import QColor, QKeyEvent
+from PySide6.QtWidgets import QApplication, QColorDialog, QLabel
 from pytestqt.qtbot import QtBot
 
 from vuechoixgarde.bootstrap import create_runtime
@@ -116,22 +116,70 @@ def test_damaged_data_read_only_mode_disables_editing(qtbot: QtBot, tmp_path: Pa
     runtime.shutdown()
 
 
-def test_profile_delete_confirmation_defaults_to_cancel(
+def test_key_capture_conflict_updates_validation_immediately_and_escape_cancels(
+    qtbot: QtBot, tmp_path: Path
+) -> None:
+    runtime, dialog = _dialog(tmp_path)
+    qtbot.addWidget(dialog)
+    dialog.show()
+    first = dialog.slot_editor.rows[0][0]
+    second = dialog.slot_editor.rows[1][0]
+    first.position = "KeyW"
+    second.start_capture()
+    conflict = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_W,
+        Qt.KeyboardModifier.NoModifier,
+        25,
+        0,
+        0,
+        "w",
+        False,
+        1,
+    )
+    QApplication.sendEvent(second, conflict)
+    assert dialog.save_button is not None and not dialog.save_button.isEnabled()
+
+    second.start_capture()
+    escape = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_Escape,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(second, escape)
+    assert not second.capturing
+    assert dialog.isVisible()
+    dialog.reject()
+    runtime.shutdown()
+
+
+def test_color_swatch_updates_after_picker_selection(
     qtbot: QtBot, tmp_path: Path, monkeypatch
 ) -> None:
     runtime, dialog = _dialog(tmp_path)
     qtbot.addWidget(dialog)
+    dialog.show()
+    QApplication.processEvents()
+    button = dialog.slot_editor.rows[0][2]
+    sample = dialog.findChild(QLabel, "colorSample")
+    assert sample is not None
+    monkeypatch.setattr(QColorDialog, "getColor", lambda **_kwargs: QColor("#AA33CC"))
+    dialog.slot_editor._choose_color(button, sample)
+    QApplication.processEvents()
+    rendered = sample.grab().toImage().pixelColor(sample.width() // 2, sample.height() // 2).name()
+    assert rendered == "#aa33cc"
+    dialog.reject()
+    runtime.shutdown()
+
+
+def test_active_profile_delete_is_disabled(qtbot: QtBot, tmp_path: Path) -> None:
+    runtime, dialog = _dialog(tmp_path)
+    qtbot.addWidget(dialog)
     dialog.profile_table.selectRow(0)
-    observed: list[bool] = []
 
-    def cancel_by_default(box: QMessageBox) -> QMessageBox.StandardButton:
-        observed.append(box.defaultButton() is box.button(QMessageBox.StandardButton.Cancel))
-        return QMessageBox.StandardButton.Cancel
-
-    monkeypatch.setattr(QMessageBox, "exec", cancel_by_default)
+    assert not dialog.action_buttons["delete_profile"].isEnabled()
     dialog._profile_action("delete_profile")
 
-    assert observed == [True]
     assert dialog.profile_table.rowCount() == 1
     dialog.reject()
     runtime.shutdown()

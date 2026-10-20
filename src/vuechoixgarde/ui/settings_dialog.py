@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import override
 
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QKeyEvent, QPalette
+from PySide6.QtGui import QDesktopServices, QKeyEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -53,6 +54,8 @@ _NAME_ERROR_TEXT = {
 
 
 class _KeyCaptureButton(QPushButton):
+    captured = Signal()
+
     def __init__(self, position: str, labels: dict[str, str], parent: QWidget) -> None:
         super().__init__(displayed_key_label(position, labels) or "?", parent)
         self.position = position
@@ -71,6 +74,12 @@ class _KeyCaptureButton(QPushButton):
             super().keyPressEvent(event)
             return
         data = keyboard_event_data(event)
+        if event.key() == Qt.Key.Key_Escape:
+            self.capturing = False
+            self.setText(displayed_key_label(self.position, self.labels) or "?")
+            self.captured.emit()
+            event.accept()
+            return
         if not data.triggers_slot or data.position not in ALLOWED_SLOT_CODES:
             self.setText(text("invalid_captured_key"))
             event.accept()
@@ -81,6 +90,7 @@ class _KeyCaptureButton(QPushButton):
             self.labels[self.position] = learned
         self.capturing = False
         self.setText(displayed_key_label(self.position, self.labels) or "?")
+        self.captured.emit()
         event.accept()
 
 
@@ -164,7 +174,7 @@ class _SlotEditor(QWidget):
         sample = QLabel()
         sample.setMinimumWidth(78)
         sample.setObjectName("colorSample")
-        sample.setStyleSheet(f"background-color: {slot.color};")
+        _set_sample_color(sample, slot.color)
         ratio = contrast_ratio(slot.color, "#383838")
         sample.setToolTip(
             text("color_contrast_warning", ratio=f"{ratio:.1f}") if ratio < 4.5 else slot.color
@@ -183,6 +193,7 @@ class _SlotEditor(QWidget):
         self.rows.append((key, name, color, errors))
         name.textChanged.connect(self._update_validation)
         key.clicked.connect(self._update_validation)
+        key.captured.connect(self._update_validation)
         self.add_button.setEnabled(not self.read_only and len(self.rows) < 12)
         self.remove_button.setEnabled(not self.read_only and len(self.rows) > 1)
 
@@ -194,7 +205,7 @@ class _SlotEditor(QWidget):
         color = selected.name().upper()
         button.setProperty("slotColor", color)
         button.setToolTip(color)
-        sample.setPalette(_button_palette(sample, color))
+        _set_sample_color(sample, color)
         ratio = contrast_ratio(color, "#383838")
         warning = text("color_contrast_warning", ratio=f"{ratio:.1f}") if ratio < 4.5 else ""
         sample.setToolTip(warning or color)
@@ -222,11 +233,8 @@ class _SlotEditor(QWidget):
         self.validation_changed.emit(not issues)
 
 
-def _button_palette(widget: QWidget, color: str) -> QPalette:
-    palette = widget.palette()
-    palette.setColor(QPalette.ColorRole.Window, color)
-    palette.setColor(QPalette.ColorRole.Button, color)
-    return palette
+def _set_sample_color(sample: QLabel, color: str) -> None:
+    sample.setStyleSheet(f"background-color: {color};")
 
 
 def _issue_text(issue: ProfileError) -> str:
@@ -282,7 +290,8 @@ class SettingsDialog(QDialog):
             parent=self,
         )
         self.save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
-        self.slot_editor.validation_changed.connect(self._set_save_enabled)
+        for editor in self.slot_editors.values():
+            editor.validation_changed.connect(self._set_save_enabled)
         if self.save_button is not None:
             self.save_button.setEnabled(not read_only)
         self._set_save_enabled()
@@ -292,13 +301,15 @@ class SettingsDialog(QDialog):
 
     def _set_save_enabled(self, _valid: bool | None = None) -> None:
         if self.save_button is not None:
-            valid = not validate_slot_profile(self.slot_editor.slots())
+            valid = all(
+                not validate_slot_profile(editor.slots()) for editor in self.slot_editors.values()
+            )
             self.save_button.setEnabled(not self.read_only and valid)
 
     def refresh_profiles(self, profiles: tuple[ProfileSummary, ...]) -> None:
         self.profiles = profiles
         self._populate_profiles()
-        self.action_buttons["delete_profile"].setEnabled(not self.read_only and bool(profiles))
+        self._update_delete_enabled()
         self.action_buttons["assign_orphan"].setEnabled(
             not self.read_only
             and self.profile is not None
@@ -319,11 +330,21 @@ class SettingsDialog(QDialog):
         self.sort_combo.addItem(text("sort_descending"), "desc")
         self.sort_combo.setCurrentIndex(1 if settings.sort_direction == "desc" else 0)
         self.sort_combo.setEnabled(not self.read_only)
+        self.language_combo = QComboBox()
+        for code, label in (("de", "Deutsch"), ("en", "English"), ("fr", "Français")):
+            self.language_combo.addItem(label, code)
+        self.language_combo.setCurrentIndex({"de": 0, "en": 1, "fr": 2}[settings.language])
+        self.language_combo.setEnabled(not self.read_only)
+        self.sound_checkbox = QCheckBox(text("sound"))
+        self.sound_checkbox.setChecked(settings.sound_enabled)
+        self.sound_checkbox.setEnabled(not self.read_only)
         self.log_button = QPushButton(text("open_log_folder"))
         self.log_button.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.log_directory)))
         )
         form.addRow(self.reopen_checkbox)
+        form.addRow(text("language"), self.language_combo)
+        form.addRow(self.sound_checkbox)
         form.addRow(text("default_sort_direction"), self.sort_combo)
         form.addRow(self.log_button)
         return page
@@ -339,30 +360,27 @@ class SettingsDialog(QDialog):
         if profile is not None:
             self.slot_target.addItem(text("current_profile"), "profile")
         layout.addWidget(self.slot_target)
-        self.slot_editor = _SlotEditor(
-            settings.global_slot_template,
-            dict(settings.learned_key_labels),
-            read_only,
-        )
-        layout.addWidget(self.slot_editor, 1)
+        self.slot_editors = {
+            "template": _SlotEditor(
+                settings.global_slot_template, dict(settings.learned_key_labels), read_only
+            )
+        }
+        if profile is not None:
+            self.slot_editors["profile"] = _SlotEditor(
+                profile.slots, dict(settings.learned_key_labels), read_only
+            )
+        self.slot_stack = QStackedWidget(page)
+        for editor in self.slot_editors.values():
+            self.slot_stack.addWidget(editor)
+        self.slot_editor = self.slot_editors["template"]
+        layout.addWidget(self.slot_stack, 1)
         self.slot_target.currentIndexChanged.connect(self._change_slot_target)
         return page
 
     def _change_slot_target(self, index: int) -> None:
-        target = self.slot_target.itemData(index)
-        slots = (
-            self.profile.slots
-            if target == "profile" and self.profile is not None
-            else self.settings.global_slot_template
-        )
-        old = self.slot_editor
-        self.slot_editor_layout.removeWidget(old)
-        old.deleteLater()
-        self.slot_editor = _SlotEditor(
-            slots, dict(self.settings.learned_key_labels), self.read_only
-        )
-        self.slot_editor.validation_changed.connect(self._set_save_enabled)
-        self.slot_editor_layout.addWidget(self.slot_editor, 1)
+        target = str(self.slot_target.itemData(index))
+        self.slot_editor = self.slot_editors[target]
+        self.slot_stack.setCurrentWidget(self.slot_editor)
         self._set_save_enabled()
 
     def _build_profiles(
@@ -376,6 +394,7 @@ class SettingsDialog(QDialog):
         )
         self.profile_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.profile_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.profile_table.currentCellChanged.connect(lambda *_args: self._update_delete_enabled())
         layout.addWidget(self.profile_table, 1)
         self.profile_actions = QHBoxLayout()
         actions = (
@@ -406,8 +425,14 @@ class SettingsDialog(QDialog):
             and profile is not None
             and any(not summary.folder_exists for summary in profiles)
         )
-        self.action_buttons["delete_profile"].setEnabled(not read_only and bool(profiles))
+        self._update_delete_enabled()
         return page
+
+    def _update_delete_enabled(self) -> None:
+        selected_id = self._selected_profile_id()
+        active_id = self.profile.id if self.profile is not None else None
+        enabled = not self.read_only and selected_id is not None and selected_id != active_id
+        self.action_buttons["delete_profile"].setEnabled(enabled)
 
     def _populate_profiles(self) -> None:
         table = self.profile_table
@@ -438,6 +463,12 @@ class SettingsDialog(QDialog):
                     return
             if action == "delete_profile" and profile_id is None:
                 self.set_message(text("select_profile"))
+                return
+            if (
+                action == "delete_profile"
+                and self.profile is not None
+                and profile_id == self.profile.id
+            ):
                 return
             if action == "assign_orphan" and profile_id is None:
                 self.set_message(text("select_orphan_profile"))
@@ -470,7 +501,16 @@ class SettingsDialog(QDialog):
     def _save(self) -> None:
         target = self.slot_target.currentData()
         slots = self.slot_editor.slots()
-        if validate_slot_profile(slots):
+        invalid_target = next(
+            (
+                name
+                for name, editor in self.slot_editors.items()
+                if validate_slot_profile(editor.slots())
+            ),
+            None,
+        )
+        if invalid_target is not None:
+            self.slot_target.setCurrentIndex(self.slot_target.findData(invalid_target))
             self.tabs.setCurrentWidget(self.slot_tab)
             self.set_message(text("slot_profile_invalid"))
             return

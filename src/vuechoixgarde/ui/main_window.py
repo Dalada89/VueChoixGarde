@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar, cast, override
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QLibraryInfo, Qt, QTimer, QTranslator
 from PySide6.QtGui import (
     QCloseEvent,
     QFontMetrics,
@@ -35,7 +35,12 @@ from PySide6.QtWidgets import (
 )
 
 from vuechoixgarde.app.results import SlotState, UseCaseStatus
-from vuechoixgarde.app.service import ProfileSummary, SessionView, SlotStatusResult
+from vuechoixgarde.app.service import (
+    PartialSettingsSaveError,
+    ProfileSummary,
+    SessionView,
+    SlotStatusResult,
+)
 from vuechoixgarde.app.toggle import TogglePlan, ToggleResult
 from vuechoixgarde.bootstrap import Runtime
 from vuechoixgarde.core.comparison import comparison_key
@@ -50,9 +55,11 @@ from vuechoixgarde.ports.errors import ImageDecodeError, ImageDecodeErrorReason
 from vuechoixgarde.ports.imaging import DecodedImage
 from vuechoixgarde.ports.log import LogEvent, LogLevel
 from vuechoixgarde.ports.models import Settings
+from vuechoixgarde.ui.help_dialog import HelpDialog
 from vuechoixgarde.ui.keyboard import keyboard_event_data, main_window_key_filter_enabled
 from vuechoixgarde.ui.settings_dialog import SettingsDialog
-from vuechoixgarde.ui.texts import text
+from vuechoixgarde.ui.sound import SoundPlayer
+from vuechoixgarde.ui.texts import set_language, text
 from vuechoixgarde.ui.workers import WorkerPools
 
 _Result = TypeVar("_Result")
@@ -92,8 +99,10 @@ class MainWindow(QMainWindow):
     def __init__(self, runtime: Runtime) -> None:
         super().__init__()
         self.runtime = runtime
+        set_language(runtime.settings.language)
         self.workers = WorkerPools()
         self.cache = DecodedImageCache(max_entries=5, max_bytes=256 * 1024 * 1024)
+        self.sound_player = SoundPlayer(self)
         self.view: SessionView | None = None
         self._pending_operations = 0
         self._slot_operation_pending = False
@@ -110,9 +119,14 @@ class MainWindow(QMainWindow):
         self._close_busy_timer.setInterval(1000)
         self._close_busy_timer.timeout.connect(lambda: self.busy_label.show())
         self._build_ui()
+        self._load_qt_translation(runtime.settings.language)
         self.settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
         self.settings_shortcut.activated.connect(
             lambda: self._open_settings() if main_window_key_filter_enabled() else None
+        )
+        self.open_shortcut = QShortcut(QKeySequence.StandardKey.Open, self)
+        self.open_shortcut.activated.connect(
+            lambda: self._choose_folder() if main_window_key_filter_enabled() else None
         )
         self.setWindowTitle(text("app_title"))
         self.resize(1100, 760)
@@ -154,13 +168,14 @@ class MainWindow(QMainWindow):
         self.settings_button.clicked.connect(self._open_settings)
         top.addWidget(self.settings_button)
         self.help_button = QPushButton(text("help"))
-        self.help_button.setEnabled(False)
+        self.help_button.clicked.connect(self._show_help)
         top.addWidget(self.help_button)
         layout.addLayout(top)
 
         self.image_label = QLabel(text("empty"))
         self.image_label.setObjectName("panel")
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setAccessibleName(text("image_accessible"))
         self.image_label.setMinimumSize(320, 240)
         self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.image_label, 1)
@@ -181,6 +196,7 @@ class MainWindow(QMainWindow):
         self.progress_text = QLabel(text("progress", current=0, total=0))
         info.addWidget(self.progress_text)
         self.progress = QProgressBar()
+        self.progress.setAccessibleName(text("progress_accessible"))
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setMaximumWidth(180)
@@ -205,6 +221,36 @@ class MainWindow(QMainWindow):
         self.refresh_button.setEnabled(opened)
         self.reconcile_button.setEnabled(opened and self.runtime.register_available)
 
+    def _load_qt_translation(self, language: str) -> None:
+        application = QApplication.instance()
+        if application is None:
+            return
+        if hasattr(self, "_qt_translator"):
+            application.removeTranslator(self._qt_translator)
+        translator = QTranslator(self)
+        directory = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+        if translator.load(f"qtbase_{language}", directory):
+            application.installTranslator(translator)
+            self._qt_translator = translator
+
+    def _retranslate(self) -> None:
+        self.setWindowTitle(text("app_title"))
+        self.open_button.setText(text("open_folder"))
+        self.sort_button.setText(
+            text(
+                "sort_descending"
+                if self.view and self.view.snapshot.descending
+                else "sort_ascending"
+            )
+        )
+        self.refresh_button.setText(text("refresh"))
+        self.reconcile_button.setText(text("reconcile"))
+        self.settings_button.setText(text("settings"))
+        self.help_button.setText(text("help"))
+        self.busy_label.setText(text("busy"))
+        if self.view is not None:
+            self._apply_view(self.view)
+
     def _choose_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, text("open_dialog_title"))
         if folder:
@@ -212,6 +258,9 @@ class MainWindow(QMainWindow):
 
     def _open_folder(self, path: Path) -> None:
         self._run_file(lambda: self.runtime.service.open_folder(path))
+
+    def _show_help(self) -> None:
+        HelpDialog(self.view, self).exec()
 
     def _open_settings(self) -> None:
         if self._pending_operations or self._slot_operation_pending:
@@ -240,20 +289,46 @@ class MainWindow(QMainWindow):
             typed_slots: tuple[Slot, ...],
             learned_labels: tuple[tuple[str, str], ...],
         ) -> None:
-            def save() -> tuple[SessionView | None, Settings]:
-                template = typed_slots if target == "template" else None
-                self.runtime.service.save_preferences(
-                    reopen_last_folder=reopen,
-                    sort_direction=direction,
-                    global_slot_template=template,
-                    learned_key_labels=learned_labels,
-                )
-                if target == "profile":
-                    self.runtime.service.save_profile_slots(typed_slots)
-                return self.runtime.service.current_view(), self.runtime.service.settings
+            def save() -> tuple[SessionView | None, Settings, Exception | None]:
+                try:
+                    template_slots = dialog.slot_editors["template"].slots()
+                    profile_slots = (
+                        dialog.slot_editors["profile"].slots()
+                        if "profile" in dialog.slot_editors
+                        else None
+                    )
+                    all_labels = dict(learned_labels)
+                    for editor in dialog.slot_editors.values():
+                        all_labels.update(editor.labels)
+                    view = self.runtime.service.save_settings_and_profile_slots(
+                        reopen_last_folder=reopen,
+                        sort_direction=direction,
+                        language=str(dialog.language_combo.currentData()),
+                        sound_enabled=dialog.sound_checkbox.isChecked(),
+                        global_slot_template=template_slots,
+                        profile_slots=profile_slots,
+                        learned_key_labels=tuple(sorted(all_labels.items())),
+                    )
+                    return view, self.runtime.service.settings, None
+                except Exception as error:
+                    return None, self.runtime.service.settings, error
 
-            def saved(value: tuple[SessionView | None, object], _error: Exception | None) -> None:
-                view, _settings = value
+            def saved(
+                value: tuple[SessionView | None, Settings, Exception | None],
+                _error: Exception | None,
+            ) -> None:
+                view, _settings, error = value
+                if error is not None:
+                    dialog.set_message(
+                        text("partial_settings_save_failed")
+                        if isinstance(error, PartialSettingsSaveError)
+                        else text("settings_save_failed")
+                    )
+                    self._show_error(error)
+                    return
+                set_language(self.runtime.service.settings.language)
+                self._load_qt_translation(self.runtime.service.settings.language)
+                self._retranslate()
                 if view is not None:
                     self._apply_view(view)
                 dialog.accept()
@@ -262,29 +337,41 @@ class MainWindow(QMainWindow):
             self._run_file(save, saved)
 
         def profile_action(action: str, profile_id: str | None) -> None:
-            def update() -> tuple[tuple[ProfileSummary, ...], SessionView | None]:
-                service = self.runtime.service
-                if action == "save_profile_as_template":
-                    service.save_profile_as_template()
-                elif action == "reset_global_template":
-                    service.reset_global_template()
-                elif action == "reset_current_profile":
-                    service.reset_profile_to_template()
-                elif action == "assign_orphan" and profile_id is not None:
-                    service.reassign_orphan(profile_id)
-                elif action == "delete_profile" and profile_id is not None:
-                    service.delete_profile(profile_id)
-                return service.profile_catalog(), service.current_view()
+            def update() -> tuple[
+                tuple[ProfileSummary, ...] | None, SessionView | None, Exception | None
+            ]:
+                try:
+                    service = self.runtime.service
+                    if action == "save_profile_as_template":
+                        service.save_profile_as_template()
+                    elif action == "reset_global_template":
+                        service.reset_global_template()
+                    elif action == "reset_current_profile":
+                        service.reset_profile_to_template()
+                    elif action == "assign_orphan" and profile_id is not None:
+                        service.reassign_orphan(profile_id)
+                    elif action == "delete_profile" and profile_id is not None:
+                        service.delete_profile(profile_id)
+                    return service.profile_catalog(), service.current_view(), None
+                except Exception as error:
+                    return None, None, error
 
             def updated(
-                value: tuple[tuple[ProfileSummary, ...], SessionView | None],
+                value: tuple[
+                    tuple[ProfileSummary, ...] | None, SessionView | None, Exception | None
+                ],
                 _error: Exception | None,
             ) -> None:
-                updated_profiles, view = value
+                updated_profiles, view, error = value
+                if error is not None:
+                    dialog.set_message(text("profile_action_failed"))
+                    self._show_error(error)
+                    return
                 if view is not None:
                     self._apply_view(view)
-                dialog.refresh_profiles(updated_profiles)
-                dialog.accept()
+                if updated_profiles is not None:
+                    dialog.refresh_profiles(updated_profiles)
+                dialog.set_message(text("profile_action_done"))
                 self.statusBar().showMessage(text("profile_action_done"), 3000)
 
             self._run_file(update, updated)
@@ -469,7 +556,16 @@ class MainWindow(QMainWindow):
             row.addWidget(name_widget, 1)
             state = view.slot_states[index]
             symbol, label_key = _STATE_PRESENTATION[state]
-            state_widget = QLabel(f"{symbol} {text(label_key)}")
+            state_text = text(label_key)
+            state_widget = QLabel(f"{symbol} {state_text}")
+            state_widget.setAccessibleName(
+                text(
+                    "slot_accessible",
+                    key=key_label,
+                    name=slot.destination_name or text("no_name"),
+                    state=state_text,
+                )
+            )
             row.addWidget(state_widget)
             columns = 6
             self.slot_layout.addWidget(container, index // columns, index % columns)
@@ -629,11 +725,10 @@ class MainWindow(QMainWindow):
                 displayed_key_label(slot.key_position, dict(view.settings.learned_key_labels))
                 or "?"
             )
-            key_name = (
-                "added"
-                if result.action is not None and result.action.value == "toggle_on"
-                else "removed"
-            )
+            was_added = result.action is not None and result.action.value == "toggle_on"
+            key_name = "added" if was_added else "removed"
+            if was_added and view.settings.sound_enabled:
+                self.sound_player.play_added()
             self.statusBar().showMessage(
                 text(key_name, key=key, name=slot.destination_name or ""), 2200
             )
@@ -784,6 +879,10 @@ class MainWindow(QMainWindow):
                 else NavigationDirection.PREVIOUS
             )
             self._queue_navigation(direction)
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_F1 and not event.modifiers():
+            self._show_help()
             event.accept()
             return
         if event.key() == Qt.Key.Key_F5 and not event.modifiers() and self.view is not None:

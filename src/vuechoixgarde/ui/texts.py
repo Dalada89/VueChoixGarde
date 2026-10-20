@@ -1,4 +1,27 @@
-"""Minimal English UI text source; keys are intended for Phase 6 catalog migration."""
+"""Localized UI message lookup backed by packaged JSON catalogs."""
+
+import json
+import logging
+from functools import lru_cache
+from importlib.resources import files
+
+_LANGUAGE = "en"
+_LOGGED_MISSING: set[tuple[str, str]] = set()
+
+
+@lru_cache(maxsize=3)
+def _catalog(code: str) -> dict[str, str]:
+    resource = files("vuechoixgarde.i18n").joinpath(f"{code}.json")
+    return json.loads(resource.read_text(encoding="utf-8"))
+
+
+def set_language(code: str) -> None:
+    """Select the active UI catalog."""
+    global _LANGUAGE
+    if code not in {"de", "en", "fr"}:
+        raise ValueError("language must be de, en, or fr")
+    _LANGUAGE = code
+
 
 TEXTS = {
     "app_title": "VueChoixGarde",
@@ -10,6 +33,9 @@ TEXTS = {
     "settings": "Settings",
     "settings_busy": "Wait until the current file operation finishes before opening settings.",
     "selected_accessible": "Selected in a destination",
+    "image_accessible": "Current image preview",
+    "progress_accessible": "Image position and total count",
+    "slot_accessible": "Slot {key}, destination {name}, state {state}",
     "general_tab": "General",
     "slots_tab": "Slots",
     "profiles_tab": "Profiles",
@@ -54,12 +80,30 @@ TEXTS = {
     ),
     "settings_saved": "Settings saved.",
     "settings_save_failed": "Settings could not be saved; the previous values remain active.",
+    "partial_settings_save_failed": (
+        "Global settings were saved, but profile slots were not. "
+        "Review the profile slots and save again."
+    ),
     "slot_status_failed": "Some destination statuses could not be checked.",
     "destination_renamed": "A destination folder was renamed; it was not moved or changed.",
     "selection_count_failed": "The selected-image count could not be checked.",
     "profile_action_failed": "The profile change failed. No image files were changed.",
     "profile_action_done": "Profile change completed.",
     "help": "Help",
+    "help_shortcuts": (
+        "→ / ←: next / previous image\\nF1: help\\nF5: refresh\\n"
+        "Esc: close this dialog\\nCtrl+,: settings\\nCtrl+O: open a source folder"
+    ),
+    "help_behavior": (
+        "A slot key adds or removes a copy. Source files are never changed. "
+        "Modified copies require confirmation. On non-US layouts, press each key once "
+        "so its label is learned; a dead key may briefly learn a composed character. "
+        "Open the log folder from Settings → General."
+    ),
+    "help_slot_accessible": "Slot {key}, destination {name}",
+    "no_name": "No name",
+    "language": "Language",
+    "sound": "Sound",
     "empty": "Open a folder to review images.",
     "empty_folder": "No supported images in this folder.",
     "filename": "No image",
@@ -125,5 +169,17 @@ TEXTS = {
 
 
 def text(message_key: str, **values: object) -> str:
-    """Return a named UI string and interpolate named values where provided."""
-    return TEXTS[message_key].format(**values) if values else TEXTS[message_key]
+    """Look up a localized message, falling back to English for missing translations."""
+    catalog = _catalog(_LANGUAGE)
+    message = catalog.get(message_key)
+    if message is None and _LANGUAGE != "en":
+        missing = (_LANGUAGE, message_key)
+        if missing not in _LOGGED_MISSING:
+            logging.getLogger(__name__).warning(
+                "missing translation for %s in %s", message_key, _LANGUAGE
+            )
+            _LOGGED_MISSING.add(missing)
+        message = _catalog("en").get(message_key)
+    if message is None:
+        raise KeyError(f"unknown UI message key: {message_key}")
+    return message.format(**values) if values else message

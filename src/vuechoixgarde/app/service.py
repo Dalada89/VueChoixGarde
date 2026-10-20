@@ -10,7 +10,7 @@ from vuechoixgarde.app.session import FolderSession
 from vuechoixgarde.app.toggle import TogglePlan, ToggleResult, execute_toggle, plan_toggle
 from vuechoixgarde.core.comparison import comparison_key
 from vuechoixgarde.core.navigation import NavigationDirection, change_sort_direction
-from vuechoixgarde.core.slots import DEFAULT_SLOTS, Slot
+from vuechoixgarde.core.slots import DEFAULT_SLOTS, Slot, validate_slot_profile
 from vuechoixgarde.ports.clock import Clock
 from vuechoixgarde.ports.filesystem import FileSystemPort, SourceFolderScanner
 from vuechoixgarde.ports.lock import FolderLockFactory
@@ -18,6 +18,10 @@ from vuechoixgarde.ports.log import EventLogger, LogEvent, LogLevel
 from vuechoixgarde.ports.models import ProfileRecord, Settings
 from vuechoixgarde.ports.settings import SettingsStore
 from vuechoixgarde.ports.state import StateStore
+
+
+class PartialSettingsSaveError(RuntimeError):
+    """Preferences failed after profile slots had already been committed."""
 
 
 @dataclass(frozen=True)
@@ -244,6 +248,43 @@ class SessionService:
                 self._log_warning("selected-image count could not be loaded")
         return SlotStatusResult(image_name, generation, states, selected, warning)
 
+    def save_settings_and_profile_slots(
+        self,
+        *,
+        reopen_last_folder: bool,
+        sort_direction: str,
+        language: str,
+        sound_enabled: bool,
+        global_slot_template: tuple[Slot, ...],
+        profile_slots: tuple[Slot, ...] | None,
+        learned_key_labels: tuple[tuple[str, str], ...],
+    ) -> SessionView | None:
+        """Validate both targets, then persist global settings before profile slots."""
+        if validate_slot_profile(global_slot_template):
+            raise ValueError("global slot template is invalid")
+        if profile_slots is not None and validate_slot_profile(profile_slots):
+            raise ValueError("profile slots are invalid")
+        if profile_slots is not None:
+            self._require_session()
+            self._ensure_idle()
+        self.save_preferences(
+            reopen_last_folder=reopen_last_folder,
+            sort_direction=sort_direction,
+            language=language,
+            sound_enabled=sound_enabled,
+            global_slot_template=global_slot_template,
+            learned_key_labels=learned_key_labels,
+        )
+        if profile_slots is None:
+            return self.current_view()
+        try:
+            return self.save_profile_slots(profile_slots)
+        except Exception as error:
+            raise PartialSettingsSaveError(
+                "Global settings were saved, but profile slots were not saved. "
+                "The settings dialog remains open."
+            ) from error
+
     def save_preferences(
         self,
         *,
@@ -251,6 +292,8 @@ class SessionService:
         sort_direction: str,
         global_slot_template: tuple[Slot, ...] | None = None,
         learned_key_labels: tuple[tuple[str, str], ...] | None = None,
+        language: str | None = None,
+        sound_enabled: bool | None = None,
     ) -> Settings:
         """Persist preferences before updating the active in-memory settings/session."""
         if not self.settings_writable:
@@ -261,6 +304,8 @@ class SessionService:
             self.settings,
             reopen_last_folder=reopen_last_folder,
             sort_direction=sort_direction,
+            language=language,
+            sound_enabled=sound_enabled,
             global_slot_template=(
                 global_slot_template
                 if global_slot_template is not None
@@ -391,11 +436,15 @@ def _settings_with(
     last_folder: str | None = None,
     global_slot_template: tuple[Slot, ...] | None = None,
     learned_key_labels: tuple[tuple[str, str], ...] | None = None,
+    language: str | None = None,
+    sound_enabled: bool | None = None,
 ) -> Settings:
+    if language is not None and language not in {"de", "en", "fr"}:
+        raise ValueError("language must be de, en, or fr")
     return Settings(
         settings.schema_version,
-        settings.language,
-        settings.sound_enabled,
+        language if language is not None else settings.language,
+        sound_enabled if sound_enabled is not None else settings.sound_enabled,
         sort_direction if sort_direction is not None else settings.sort_direction,
         reopen_last_folder if reopen_last_folder is not None else settings.reopen_last_folder,
         last_folder if last_folder is not None else settings.last_folder,
