@@ -23,6 +23,8 @@ from vuechoixgarde.ports.log import EventLogger, LogEvent, LogLevel
 from vuechoixgarde.ports.models import (
     CopyRecord,
     FileFingerprint,
+    FolderRenameRecord,
+    FolderRenameState,
     LoadStatus,
     OperationFileRecord,
     OperationRecord,
@@ -119,6 +121,7 @@ class InMemoryStateStore(StateStore):
         self.profiles: dict[str, ProfileRecord] = {}
         self.records: list[CopyRecord] = []
         self.operations: dict[str, OperationRecord] = {}
+        self.folder_renames: dict[str, FolderRenameRecord] = {}
 
     def load(self) -> StateLoadResult:
         return StateLoadResult(LoadStatus.LOADED, True)
@@ -127,6 +130,7 @@ class InMemoryStateStore(StateStore):
         self.profiles.clear()
         self.records.clear()
         self.operations.clear()
+        self.folder_renames.clear()
         return Path("quarantine.db")
 
     def get_profile_by_identity(self, folder_identity: str) -> ProfileRecord | None:
@@ -151,6 +155,11 @@ class InMemoryStateStore(StateStore):
             for operation_id, operation in self.operations.items()
             if operation.profile_id != profile_id
         }
+        self.folder_renames = {
+            rename_id: rename
+            for rename_id, rename in self.folder_renames.items()
+            if rename.profile_id != profile_id
+        }
 
     def create_profile_from_template(
         self, folder_identity: str, display_path: str, slots: Sequence[Slot]
@@ -167,6 +176,128 @@ class InMemoryStateStore(StateStore):
         updated = replace(profile, slots=tuple(slots), updated_at=self._timestamp())
         self.profiles[profile_id] = updated
         return updated
+
+    def start_folder_renames(
+        self, profile_id: str, records: tuple[FolderRenameRecord, ...]
+    ) -> None:
+        self._profile(profile_id)
+        now = self._timestamp()
+        for record in records:
+            if record.profile_id != profile_id or record.state is not FolderRenameState.STARTED:
+                raise ValueError("invalid rename record")
+            if record.id in self.folder_renames:
+                raise ValueError("rename ID already exists")
+        for record in records:
+            self.folder_renames[record.id] = replace(
+                record,
+                started_at=record.started_at or now,
+                updated_at=record.updated_at or now,
+            )
+
+    def complete_folder_renames(
+        self,
+        profile_id: str,
+        rename_ids: tuple[str, ...],
+        folder_updates: tuple[tuple[str, str], ...],
+        removed_folders: tuple[str, ...],
+        slots: tuple[Slot, ...],
+    ) -> None:
+        profile = self._profile(profile_id)
+        if len(set(rename_ids)) != len(rename_ids):
+            raise ValueError("duplicate rename ID")
+        for rename_id in rename_ids:
+            record = self.folder_renames.get(rename_id)
+            if (
+                record is None
+                or record.profile_id != profile_id
+                or record.state is not FolderRenameState.STARTED
+            ):
+                raise ValueError(f"rename is missing or not started: {rename_id}")
+        targets = {
+            new for _, new in folder_updates if new not in {old for old, _ in folder_updates}
+        }
+        if any(record.destination_folder in targets for record in self.records):
+            raise ValueError("copy records already exist for target folder")
+
+        updated_records = list(self.records)
+        for old_folder, new_folder in folder_updates:
+            updated_records = [
+                replace(record, destination_folder=new_folder)
+                if record.profile_id == profile_id and record.destination_folder == old_folder
+                else record
+                for record in updated_records
+            ]
+        updated_records = [
+            record
+            for record in updated_records
+            if not (
+                record.profile_id == profile_id and record.destination_folder in removed_folders
+            )
+        ]
+        now = self._timestamp()
+        self.records = updated_records
+        self.profiles[profile_id] = replace(profile, slots=slots, updated_at=now)
+        for rename_id in rename_ids:
+            self.folder_renames[rename_id] = replace(
+                self.folder_renames[rename_id], state=FolderRenameState.DONE, updated_at=now
+            )
+
+    def _mark_folder_renames(self, rename_ids: tuple[str, ...], state: FolderRenameState) -> None:
+        for rename_id in rename_ids:
+            record = self.folder_renames.get(rename_id)
+            if record is None or record.state is not FolderRenameState.STARTED:
+                raise ValueError(f"rename is missing or not started: {rename_id}")
+        now = self._timestamp()
+        for rename_id in rename_ids:
+            self.folder_renames[rename_id] = replace(
+                self.folder_renames[rename_id], state=state, updated_at=now
+            )
+
+    def mark_folder_renames_rolled_back(self, rename_ids: tuple[str, ...]) -> None:
+        self._mark_folder_renames(rename_ids, FolderRenameState.ROLLED_BACK)
+
+    def mark_folder_rename_recovered(self, rename_id: str) -> None:
+        self._mark_folder_renames((rename_id,), FolderRenameState.RECOVERED)
+
+    def unfinished_folder_renames(self) -> tuple[FolderRenameRecord, ...]:
+        return tuple(
+            record
+            for record in self.folder_renames.values()
+            if record.state is FolderRenameState.STARTED
+        )
+
+    def remove_destination_folder_records(
+        self, profile_id: str, destination_folder: str, slots: tuple[Slot, ...]
+    ) -> int:
+        profile = self._profile(profile_id)
+        removed = sum(
+            record.profile_id == profile_id and record.destination_folder == destination_folder
+            for record in self.records
+        )
+        now = self._timestamp()
+        self.records = [
+            record
+            for record in self.records
+            if not (
+                record.profile_id == profile_id and record.destination_folder == destination_folder
+            )
+        ]
+        self.profiles[profile_id] = replace(profile, slots=slots, updated_at=now)
+        return removed
+
+    def remove_copy_records(
+        self, profile_id: str, destination_folder: str, names: tuple[str, ...]
+    ) -> None:
+        name_set = set(names)
+        self.records = [
+            record
+            for record in self.records
+            if not (
+                record.profile_id == profile_id
+                and record.destination_folder == destination_folder
+                and record.destination_name in name_set
+            )
+        ]
 
     def orphaned_profiles(self, folder_exists: Callable[[str], bool]) -> tuple[ProfileRecord, ...]:
         return tuple(
@@ -310,7 +441,28 @@ class FaultInjectingFileSystem(LocalFileSystem):
         self.finalize_attempts = 0
         self.crash_after_finalize = False
         self.conflict_before_crash = False
+        self.fail_rename = False
+        self.fail_rename_at: int | None = None
+        self.rename_attempts = 0
+        self.crash_after_rename = False
         self.finalized: list[str] = []
+
+    def rename_destination_folder(
+        self,
+        source_root: Path,
+        old_exact_name: str,
+        new_name: str,
+        intermediate_name: str | None = None,
+    ) -> Path:
+        self.rename_attempts += 1
+        if self.fail_rename or self.rename_attempts == self.fail_rename_at:
+            raise FileSystemError(FileSystemErrorReason.IO_ERROR, path=source_root / old_exact_name)
+        result = super().rename_destination_folder(
+            source_root, old_exact_name, new_name, intermediate_name
+        )
+        if self.crash_after_rename:
+            raise SimulatedCrash
+        return result
 
     def copy_to_temp(
         self, source_root: Path, destination_folder: Path, source_name: str, temp_name: str

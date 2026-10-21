@@ -35,7 +35,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from vuechoixgarde.app.results import SlotState, UseCaseStatus
+from vuechoixgarde.app.results import (
+    FolderDeletionCase,
+    FolderDeletionCheck,
+    FolderDeletionResult,
+    FolderDeletionStatus,
+    FolderManagementError,
+    FolderManagementReason,
+    SlotState,
+    UseCaseStatus,
+)
 from vuechoixgarde.app.service import (
     PartialSettingsSaveError,
     ProfileSummary,
@@ -48,7 +57,6 @@ from vuechoixgarde.core.comparison import comparison_key
 from vuechoixgarde.core.folder_names import FolderNameError, validate_folder_name
 from vuechoixgarde.core.keys import displayed_key_label, update_learned_key_labels
 from vuechoixgarde.core.navigation import NavigationDirection
-from vuechoixgarde.core.slots import Slot
 from vuechoixgarde.core.sorting import sort_names
 from vuechoixgarde.imaging.cache import DecodedImageCache
 from vuechoixgarde.imaging.size import screen_decode_bounds
@@ -58,7 +66,7 @@ from vuechoixgarde.ports.log import LogEvent, LogLevel
 from vuechoixgarde.ports.models import Settings
 from vuechoixgarde.ui.help_dialog import HelpDialog
 from vuechoixgarde.ui.keyboard import keyboard_event_data, main_window_key_filter_enabled
-from vuechoixgarde.ui.settings_dialog import SettingsDialog
+from vuechoixgarde.ui.settings_dialog import SettingsDialog, SettingsSubmission
 from vuechoixgarde.ui.sound import SoundPlayer
 from vuechoixgarde.ui.texts import set_language, text
 from vuechoixgarde.ui.workers import WorkerPools
@@ -369,32 +377,18 @@ class MainWindow(QMainWindow):
         )
         dialog: SettingsDialog
 
-        def save_preferences(
-            reopen: bool,
-            direction: str,
-            target: str,
-            typed_slots: tuple[Slot, ...],
-            learned_labels: tuple[tuple[str, str], ...],
-        ) -> None:
+        def save_preferences(submission: SettingsSubmission) -> None:
             def save() -> tuple[SessionView | None, Settings, Exception | None]:
                 try:
-                    template_slots = dialog.slot_editors["template"].slots()
-                    profile_slots = (
-                        dialog.slot_editors["profile"].slots()
-                        if "profile" in dialog.slot_editors
-                        else None
-                    )
-                    all_labels = dict(learned_labels)
-                    for editor in dialog.slot_editors.values():
-                        all_labels.update(editor.labels)
                     view = self.runtime.service.save_settings_and_profile_slots(
-                        reopen_last_folder=reopen,
-                        sort_direction=direction,
-                        language=str(dialog.language_combo.currentData()),
-                        sound_enabled=dialog.sound_checkbox.isChecked(),
-                        global_slot_template=template_slots,
-                        profile_slots=profile_slots,
-                        learned_key_labels=tuple(sorted(all_labels.items())),
+                        reopen_last_folder=submission.reopen_last_folder,
+                        sort_direction=submission.sort_direction,
+                        language=submission.language,
+                        sound_enabled=submission.sound_enabled,
+                        global_slot_template=submission.global_slot_template,
+                        profile_slots=submission.profile_slots,
+                        learned_key_labels=submission.learned_key_labels,
+                        renames=submission.renames,
                     )
                     return view, self.runtime.service.settings, None
                 except Exception as error:
@@ -404,24 +398,137 @@ class MainWindow(QMainWindow):
                 value: tuple[SessionView | None, Settings, Exception | None],
                 _error: Exception | None,
             ) -> None:
-                view, _settings, error = value
+                view, settings, error = value
                 if error is not None:
-                    dialog.set_message(
-                        text("partial_settings_save_failed")
-                        if isinstance(error, PartialSettingsSaveError)
-                        else text("settings_save_failed")
-                    )
-                    self._show_error(error)
+                    dialog.set_busy(False)
+                    if isinstance(error, FolderManagementError):
+                        reason_text = {
+                            FolderManagementReason.NAME_OCCUPIED: "rename_name_occupied",
+                            FolderManagementReason.INVALID_NAME: "rename_invalid_name",
+                            FolderManagementReason.OLD_FOLDER_FAULTY: "rename_old_faulty",
+                            FolderManagementReason.RENAME_FAILED: "rename_failed",
+                            FolderManagementReason.ROLLBACK_FAILED: "rename_rollback_failed",
+                            FolderManagementReason.RECOVERY_FAILED: "rename_recovery_failed",
+                            FolderManagementReason.UNAVAILABLE: "rename_unavailable",
+                        }.get(error.reason, "rename_failed")
+                        dialog.set_message(
+                            text(
+                                reason_text,
+                                old=error.old_name or "",
+                                new=error.new_name or "",
+                            )
+                        )
+                    else:
+                        dialog.set_message(
+                            text("partial_settings_save_failed")
+                            if isinstance(error, PartialSettingsSaveError)
+                            else text("settings_save_failed")
+                        )
+                        self._show_error(error)
                     return
-                set_language(self.runtime.service.settings.language)
-                self._load_qt_translation(self.runtime.service.settings.language)
+                set_language(settings.language)
+                self._load_qt_translation(settings.language)
                 self._retranslate()
                 if view is not None:
                     self._apply_view(view)
                 dialog.accept()
-                self.statusBar().showMessage(text("settings_saved"), 2500)
+                if view is not None and view.renamed:
+                    message = "; ".join(
+                        text("destination_folder_renamed", old=old, new=new)
+                        for old, new in view.renamed
+                    )
+                    self.statusBar().showMessage(message, 3500)
+                else:
+                    self.statusBar().showMessage(text("settings_saved"), 2500)
 
             self._run_file(save, saved)
+
+        def request_destination_delete(slot_index: int) -> None:
+            dialog.set_busy(True)
+
+            def inspect() -> tuple[FolderDeletionCheck | None, Exception | None]:
+                try:
+                    return self.runtime.service.inspect_destination_folder(slot_index), None
+                except Exception as error:
+                    return None, error
+
+            def inspected(
+                value: tuple[FolderDeletionCheck | None, Exception | None],
+                _error: Exception | None,
+            ) -> None:
+                dialog.set_busy(False)
+                check, error = value
+                if error is not None:
+                    self._show_folder_management_error(dialog, error)
+                elif check is not None:
+                    confirm_and_delete(check)
+
+            self._run_file(inspect, inspected)
+
+        def confirm_and_delete(check: FolderDeletionCheck) -> None:
+            if not self._ask_folder_delete_confirmation(dialog, check):
+                return
+
+            dialog.set_busy(True)
+
+            def delete() -> tuple[
+                FolderDeletionResult | None, SessionView | None, Exception | None
+            ]:
+                try:
+                    result = self.runtime.service.delete_destination_folder(check.slot_index, check)
+                    return result, self.runtime.service.current_view(), None
+                except Exception as error:
+                    return None, None, error
+
+            def deleted(
+                value: tuple[FolderDeletionResult | None, SessionView | None, Exception | None],
+                _error: Exception | None,
+            ) -> None:
+                dialog.set_busy(False)
+                result, view, error = value
+                if error is not None:
+                    self._show_folder_management_error(dialog, error)
+                    return
+                if result is None:
+                    return
+                if result.status is FolderDeletionStatus.CHECK_CHANGED:
+                    self.statusBar().showMessage(text("delete_folder_check_changed"), 4000)
+                    confirm_and_delete(result.check)
+                    return
+                if view is not None:
+                    self._apply_view(view)
+                    dialog.update_profile(view.snapshot.profile)
+                if result.status is FolderDeletionStatus.DELETED:
+                    self.statusBar().showMessage(
+                        text(
+                            "delete_folder_done",
+                            name=result.check.folder_name,
+                            count=result.deleted_count,
+                        ),
+                        3500,
+                    )
+                elif result.status is FolderDeletionStatus.REMOVED_INFO:
+                    self.statusBar().showMessage(
+                        text("delete_folder_info_removed", name=result.check.folder_name), 3500
+                    )
+                elif result.status is FolderDeletionStatus.DETACHED:
+                    QMessageBox.warning(
+                        dialog,
+                        text("delete_folder_title"),
+                        text("delete_folder_foreign_warning", name=result.check.folder_name),
+                    )
+                elif result.status is FolderDeletionStatus.PARTIAL:
+                    QMessageBox.warning(
+                        dialog,
+                        text("delete_folder_title"),
+                        text(
+                            "delete_folder_partial",
+                            name=result.check.folder_name,
+                            count=result.deleted_count,
+                        ),
+                    )
+
+            self._run_file(delete, deleted)
 
         def profile_action(action: str, profile_id: str | None) -> None:
             def update() -> tuple[
@@ -450,6 +557,7 @@ class MainWindow(QMainWindow):
                 _error: Exception | None,
             ) -> None:
                 updated_profiles, view, error = value
+                dialog.set_busy(False)
                 if error is not None:
                     dialog.set_message(text("profile_action_failed"))
                     self._show_error(error)
@@ -471,6 +579,7 @@ class MainWindow(QMainWindow):
             read_only=not self.runtime.settings_writable,
             on_save=save_preferences,
             on_profile_action=profile_action,
+            on_delete_request=request_destination_delete,
             parent=self,
         )
         dialog.exec()
@@ -911,6 +1020,74 @@ class MainWindow(QMainWindow):
         self._slot_operation_pending = False
         if self.view is not None:
             self._render_slots(self.view)
+
+    def _ask_folder_delete_confirmation(self, parent: QWidget, check: FolderDeletionCheck) -> bool:
+        box = QMessageBox(parent)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setWindowTitle(text("delete_folder_title"))
+        if check.case is FolderDeletionCase.DELETABLE:
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(
+                text(
+                    "delete_folder_confirm_deletable",
+                    name=check.folder_name,
+                    count=len(check.managed_names),
+                )
+            )
+            yes_key = "delete_folder_yes_delete"
+        elif check.case is FolderDeletionCase.MISSING:
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(text("delete_folder_confirm_missing", name=check.folder_name))
+            yes_key = "delete_folder_yes_detach"
+        elif check.case is FolderDeletionCase.FAULTY:
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setText(text("delete_folder_confirm_faulty", name=check.folder_name))
+            yes_key = "delete_folder_yes_detach"
+        else:
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setText(text("delete_folder_title"))
+            shown_names = ", ".join(check.foreign_names[:10])
+            if len(check.foreign_names) > 10:
+                shown_names = text(
+                    "delete_folder_names_more",
+                    names=shown_names,
+                    count=len(check.foreign_names) - 10,
+                )
+            box.setInformativeText(
+                text(
+                    "delete_folder_confirm_foreign",
+                    name=check.folder_name,
+                    count=len(check.foreign_names),
+                    names=shown_names,
+                )
+            )
+            yes_key = "delete_folder_yes_detach"
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        yes_button = box.button(QMessageBox.StandardButton.Yes)
+        cancel_button = box.button(QMessageBox.StandardButton.Cancel)
+        if yes_button is not None:
+            yes_button.setText(text(yes_key))
+        if cancel_button is not None:
+            cancel_button.setText(text("cancel"))
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.setEscapeButton(QMessageBox.StandardButton.Cancel)
+        return box.exec() == QMessageBox.StandardButton.Yes
+
+    def _show_folder_management_error(self, dialog: SettingsDialog, error: Exception) -> None:
+        if not isinstance(error, FolderManagementError):
+            self._show_error(error)
+            return
+        reason_text = {
+            FolderManagementReason.NAME_OCCUPIED: "rename_name_occupied",
+            FolderManagementReason.INVALID_NAME: "rename_invalid_name",
+            FolderManagementReason.OLD_FOLDER_FAULTY: "rename_old_faulty",
+            FolderManagementReason.RENAME_FAILED: "rename_failed",
+            FolderManagementReason.ROLLBACK_FAILED: "rename_rollback_failed",
+            FolderManagementReason.RECOVERY_FAILED: "rename_recovery_failed",
+            FolderManagementReason.UNAVAILABLE: "folder_management_unavailable",
+        }.get(error.reason, "rename_failed")
+        dialog.set_busy(False)
+        dialog.set_message(text(reason_text, old=error.old_name or "", new=error.new_name or ""))
 
     def _show_error(self, error: Exception) -> None:
         box = QMessageBox(self)

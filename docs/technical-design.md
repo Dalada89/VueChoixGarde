@@ -109,8 +109,8 @@ The `src` layout prevents tests from accidentally importing the working director
 
 ### 4.3 Concurrency model
 
-- **UI thread:** Qt event loop only; no file I/O or decoding (NFR-012).
-- **File operations:** exactly one worker (single-thread executor). The `app` layer holds an “operation running” flag; slot activations while it is set are ignored with brief feedback (FR-051).
+- **UI thread:** Qt event loop only; no file I/O or decoding (NFR-012). Settings values, including profile slots, rename intent, language, sound and learned labels, are copied into an immutable submission on the UI thread before a worker starts.
+- **File operations:** exactly one worker (single-thread executor). The `app` layer holds an “operation running” flag; slot activations while it is set are ignored with brief feedback (FR-051). Workers receive immutable values and never read Qt widgets.
 - **Image decoding:** a small thread pool (2 workers). Each request carries a generation number; results for an image that is no longer current or a neighbor are discarded (FR-026).
 - **Reconciliation:** runs on the file-operation worker so it never overlaps with a toggle; shows a busy indicator after ~1 s (NFR-012).
 - Results are passed back to the UI thread via Qt signals (queued connections).
@@ -124,8 +124,9 @@ The `src` layout prevents tests from accidentally importing the working director
 3. Compute the **folder identity** (Section 8.4) and acquire the single-instance lock for it (Section 8.5). If the lock is held by another instance, refuse with a message (NFR-043).
 4. Scan the top level (Section 8.3) and build the image list; sort (FR-008/009).
 5. Load the destination profile for the folder identity; if none exists, copy the global slot template (FR-041).
-6. Clean up own temporary files from interrupted runs using the operation journal (FR-046, Section 5.4).
-7. Run reconciliation in the background (FR-070); slot states are shown as “checking” until it finishes.
+6. Recover any interrupted destination-folder rename from `folder_renames` before copy recovery or reconciliation (Section 5.5).
+7. Clean up own temporary files from interrupted runs using the copy-operation journal (FR-046, Section 5.4).
+8. Run reconciliation in the background (FR-070); slot states are shown as “checking” until it finishes.
 
 ### 5.2 Toggle decision (FR-044–FR-050, FR-063)
 
@@ -179,7 +180,17 @@ When a slot key is pressed, the `app` layer captures the current image *at the t
 6. **Crash recovery** on the next start or folder open: for every journal entry not in a final state, delete its temporary files if present and delete finalized files only if their size and hash match the journal; then close the entry. Files not listed in the journal are never touched.
 7. On success: feedback with slot color, key and name, plus sound if enabled (FR-056, FR-057).
 
-### 5.5 Reconciliation (FR-070, FR-071)
+### 5.5 Destination-folder rename and deletion (FR-100–FR-104)
+
+**Rename.** The profile slot editor retains each saved destination name as its origin value. A rename is emitted only for an existing profile row whose non-empty name changed; new/removed rows, emptying a name, template edits and profile reassignment do not rename folders. The UI copies all settings and rename intent into an immutable submission before dispatching the file worker (Section 4.3).
+
+Before any write, the application validates all names and resolves every old folder without following links. It rejects faulty old folders, occupied targets (including comparison-key/case/Unicode collisions), duplicate targets and same-save name swaps. Missing old folders are allowed: only the profile name changes and stale register rows are removed. When the old and new names differ only by comparison key, the operation uses a journaled `.vcg-rename-<uuid>` intermediate name and two no-replace renames.
+
+The SQLite `folder_renames` journal is committed before filesystem mutation and stores exact old/new path keys, the optional intermediate path, target profile slots and state. Successful completion moves register paths, replaces slots and closes journal rows in one transaction. An ordinary failure reverses completed operations and marks the journal rolled back; a failed rollback leaves the journal open and blocks folder management. On folder open, recovery runs before copy-journal recovery and reconciliation: untouched old folders close as rolled back; completed renames apply the target slots/register paths; intermediate names are returned to the old name; ambiguous states remain pending; missing folders have stale register rows removed while the target slot configuration is retained.
+
+**Delete or detach.** Inspection classifies every direct child without following links, includes hidden entries, and verifies candidate managed files against the register by size and SHA-256. All unregistered, changed, linked, directory or other entries are foreign. An immutable check token hashes the sorted `(name, kind, size, sha256)` evidence. Execution reinspects immediately before acting; a changed case/token returns `CHECK_CHANGED` and nothing is deleted. A deletable folder loses only verified files and is removed only with `rmdir`; partial failure removes register rows only for copies already deleted and retains the slot. Foreign/faulty folders are never physically changed: confirmation can detach the slot and clear its register records. A missing folder clears metadata only. Destructive confirmation is shown in the UI thread and defaults to Cancel; the worker never reads widgets.
+
+### 5.6 Reconciliation (FR-070, FR-071)
 
 For every register entry of the current profile: `stat` the destination file; missing → remove entry; size differs → `modified`; otherwise hash the file and compare. To keep opening fast with many entries, the register additionally stores the copy's `mtime_ns` at finalization; if size and `mtime_ns` are unchanged, the hash check may be skipped during automatic reconciliation. The manual “Reconcile” command always hashes. FR-050 always hashes the files involved before a toggle, so the shortcut never influences a delete decision.
 
@@ -224,16 +235,18 @@ Small, human-readable, written atomically (temporary file in the same directory,
 
 ### 6.3 `state.sqlite3`
 
-SQLite (standard library, WAL mode, `PRAGMA user_version` as schema version). Chosen over plain JSON because the copy register can grow to tens of thousands of entries and because the journal and the register must be updated in one transaction.
+SQLite (standard library, WAL mode, `PRAGMA user_version` as schema version 2, with a v1→v2 migration). Chosen over plain JSON because the copy register can grow to tens of thousands of entries and because journals and register updates must be transactional.
 
 | Table | Content |
 |---|---|
 | `profiles` | id, folder identity (Section 8.4), display path, created/updated timestamps |
 | `slots` | profile id, order, key position, destination name, color |
 | `copies` | copy register: profile id, source folder, source name, destination folder, destination name, size, SHA-256, `mtime_ns` at finalization, created timestamp |
-| `operations` | journal for toggle on: id, state (`started`, `done`, `rolled_back`, `recovered`), per-file temporary name, final name, expected size and hash |
+| `operations` | toggle-on journal header: id, profile id, destination name, state (`started`, `done`, `rolled_back`, `recovered`), timestamps |
+| `operation_files` | ordered child rows for each copy journal: temporary name, final name, expected size and SHA-256 |
+| `folder_renames` | folder-rename journal: exact old/new/intermediate folder path keys, target slot JSON, state (`started`, `done`, `rolled_back`, `recovered`) and timestamps |
 
-Reassigning a profile to a moved folder (FR-042) updates the profile's folder identity and rewrites the source/destination folder paths of its register entries; reconciliation then checks them.
+`copies.destination_folder` and all rename-journal folder paths use the same `destination_folder_key(source_root, exact_name)` representation. Reassigning a profile to a moved folder (FR-042) updates the profile's folder identity and rewrites the source/destination folder paths of its register entries; reconciliation then checks them.
 
 ### 6.4 First start and damaged data (FR-062, FR-063)
 
@@ -333,6 +346,10 @@ Implemented once in `core` and applied identically on all platforms: not empty, 
 
 Paths longer than 260 characters work only if the system setting “LongPathsEnabled” is active or `\\?\` prefixes are used. `fsops` uses extended-length paths internally on Windows; this is covered by an integration test.
 
+### 8.10 Destination-folder filesystem operations
+
+Folder renames use direct-child validation with `lstat`, containment checks and no-follow link/junction rejection. The operation never merges directories or replaces a target: Windows uses `Path.rename` semantics that fail when the target exists; Linux uses `renameat2(RENAME_NOREPLACE)` and macOS uses `renamex_np(RENAME_EXCL)`. POSIX filesystems without a supported no-replace primitive fail closed. A case-only rename uses a journaled unique intermediate child and rechecks directory names after the move. Deletion uses only `rmdir` after verified managed files have been unlinked; recursive removal is never used.
+
 ## 9. User interface
 
 ### 9.1 Main window
@@ -350,7 +367,8 @@ Paths longer than 260 characters work only if the system setting “LongPathsEna
 
 ### 9.2 Dialogs
 
-- **Settings** (FR-064): tabs *General* (language, sound, sort direction, reopen last folder, open log folder), *Slots* (add/remove 1–12 slots, assign key by pressing it, name, color; duplicate keys and names are flagged inline and block saving, FR-032/033), *Profiles* (save as template, reset template, reset profile, assign an orphaned profile, FR-042).
+- **Settings** (FR-064): tabs *General* (language, sound, sort direction, reopen last folder, open log folder), *Slots* (add/remove 1–12 slots, assign key by pressing it, name, color; duplicate keys and names are flagged inline and block saving, FR-032/033; saved profile destinations can be renamed or inspected for deletion), *Profiles* (save as template, reset template, reset profile, assign an orphaned profile, FR-042).
+- **Destination deletion:** inspect and confirm in the UI thread; default and Escape are Cancel. The informative text lists foreign entries. Workers receive the immutable check token and return `CHECK_CHANGED` when the inspected state is stale.
 - **Name prompt** (FR-035) with live validation (FR-034).
 - **Confirmation for modified copies** (FR-049): lists the files; default button “Cancel”.
 - **Errors** (FR-090): `QMessageBox` with a plain-language text naming the file/folder and a hint; technical details in the expandable details section.

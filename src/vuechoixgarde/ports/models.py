@@ -52,6 +52,23 @@ class DestinationFault(StrEnum):
     AMBIGUOUS = "ambiguous"
 
 
+class EntryKind(StrEnum):
+    """No-follow classification of an entry in a destination folder."""
+
+    FILE = "file"
+    DIRECTORY = "directory"
+    LINK = "link"
+    OTHER = "other"
+
+
+@dataclass(frozen=True)
+class DestinationEntry:
+    """One exact direct-child entry in a destination folder."""
+
+    name: str
+    kind: EntryKind
+
+
 @dataclass(frozen=True)
 class DestinationResolution:
     """Resolution result; `exact_name` is populated only for FOUND."""
@@ -161,6 +178,30 @@ class OperationRecord:
     started_at: str
     updated_at: str
     files: tuple[OperationFileRecord, ...]
+
+
+class FolderRenameState(StrEnum):
+    """State of a journaled destination-folder rename."""
+
+    STARTED = "started"
+    DONE = "done"
+    ROLLED_BACK = "rolled_back"
+    RECOVERED = "recovered"
+
+
+@dataclass(frozen=True)
+class FolderRenameRecord:
+    """A folder-rename journal row, including the slots to restore after a crash."""
+
+    id: str
+    profile_id: str
+    old_folder: str
+    new_folder: str
+    intermediate_folder: str | None
+    state: FolderRenameState
+    started_at: str
+    updated_at: str
+    target_slots: tuple[Slot, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -16,6 +16,8 @@ from vuechoixgarde.ports.errors import (
 )
 from vuechoixgarde.ports.models import (
     CopyRecord,
+    FolderRenameRecord,
+    FolderRenameState,
     LoadStatus,
     OperationFileRecord,
     OperationState,
@@ -24,7 +26,7 @@ from vuechoixgarde.ports.models import (
 from vuechoixgarde.store.damage import quarantine_damaged
 from vuechoixgarde.store.paths import application_data_dir
 from vuechoixgarde.store.settings import JsonSettingsStore
-from vuechoixgarde.store.state import SQLiteStateStore
+from vuechoixgarde.store.state import SQLiteStateStore, _migration_0_to_1
 
 
 def test_application_data_path_can_be_injected_and_prepared(tmp_path: Path, fixed_clock) -> None:
@@ -152,6 +154,37 @@ def test_quarantine_uses_a_unique_name_without_replacing_existing_file(
     assert not damaged.exists()
 
 
+def test_state_store_migrates_version_one_database_without_losing_profiles(
+    tmp_path: Path, fixed_clock
+) -> None:
+    store = SQLiteStateStore(tmp_path / "app", fixed_clock)
+    with sqlite3.connect(store.path) as connection:
+        _migration_0_to_1(connection)
+        connection.execute(
+            """
+            INSERT INTO profiles(id, folder_identity, display_path, created_at, updated_at)
+            VALUES ('profile-id', '/source', '/source', 'created', 'updated')
+            """
+        )
+
+    result = store.load()
+    assert result.status is LoadStatus.LOADED
+    with store._connect() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert (
+            connection.execute(
+                "SELECT folder_identity FROM profiles WHERE id = 'profile-id'"
+            ).fetchone()[0]
+            == "/source"
+        )
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'folder_renames'"
+            ).fetchone()
+            is not None
+        )
+
+
 def test_state_store_creates_schema_and_roundtrips_profiles_and_register(
     tmp_path: Path, fixed_clock
 ) -> None:
@@ -162,7 +195,21 @@ def test_state_store_creates_schema_and_roundtrips_profiles_and_register(
     with store._connect() as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].casefold() == "wal"
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        rename_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(folder_renames)")
+        }
+        assert rename_columns == {
+            "id",
+            "profile_id",
+            "old_folder",
+            "new_folder",
+            "intermediate_folder",
+            "target_slots_json",
+            "state",
+            "started_at",
+            "updated_at",
+        }
         copy_columns = {row["name"] for row in connection.execute("PRAGMA table_info(copies)")}
         assert "modified" not in copy_columns
         assert (
@@ -301,7 +348,7 @@ def test_corrupt_sqlite_is_damaged_and_unchanged(tmp_path: Path, fixed_clock) ->
     assert path.read_bytes() == original
 
 
-def test_existing_version_zero_database_migrates_to_version_one(
+def test_existing_version_zero_database_migrates_to_version_two(
     tmp_path: Path, fixed_clock
 ) -> None:
     root = tmp_path / "app"
@@ -313,12 +360,190 @@ def test_existing_version_zero_database_migrates_to_version_one(
     result = SQLiteStateStore(root, fixed_clock).load()
     assert result.status is LoadStatus.LOADED
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
         tables = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-    assert {"profiles", "slots", "copies", "operations", "operation_files"}.issubset(tables)
+    assert {
+        "profiles",
+        "slots",
+        "copies",
+        "operations",
+        "operation_files",
+        "folder_renames",
+    }.issubset(tables)
+
+
+def test_existing_version_one_database_migrates_to_version_two(tmp_path: Path, fixed_clock) -> None:
+    root = tmp_path / "app"
+    root.mkdir()
+    path = root / "state.sqlite3"
+    with sqlite3.connect(path) as connection:
+        _migration_0_to_1(connection)
+
+    result = SQLiteStateStore(root, fixed_clock).load()
+    assert result.status is LoadStatus.LOADED
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'folder_renames'"
+            ).fetchone()
+            is not None
+        )
+
+
+def _profile_slots(store: SQLiteStateStore, identity: str) -> tuple[Slot, ...]:
+    profile = store.get_profile_by_identity(identity)
+    assert profile is not None
+    return profile.slots
+
+
+def _add_copy(
+    store: SQLiteStateStore, profile_id: str, source_folder: str, destination_folder: str, name: str
+) -> CopyRecord:
+    digest = hashlib.sha256(name.encode()).hexdigest()
+    operation_id = uuid4().hex
+    store.start_operation(
+        operation_id,
+        profile_id,
+        Path(destination_folder).name,
+        (OperationFileRecord(0, temp_file_name(operation_id, 0), name, len(name), digest),),
+    )
+    copy = CopyRecord(
+        profile_id,
+        source_folder,
+        name,
+        destination_folder,
+        name,
+        len(name),
+        digest,
+        1,
+        "2025-01-02T03:04:05.123456Z",
+    )
+    store.complete_operation(operation_id, (copy,))
+    return copy
+
+
+def test_folder_rename_journal_and_register_methods(tmp_path: Path, fixed_clock) -> None:
+    store = SQLiteStateStore(tmp_path / "app", fixed_clock)
+    store.load()
+    profile = store.create_profile_from_template("/source", "/source", DEFAULT_SLOTS)
+    _add_copy(store, profile.id, "/source", "/source/Old", "one.jpg")
+    _add_copy(store, profile.id, "/source", "/source/Old", "two.jpg")
+    target_slots = (Slot("KeyW", "New", "#112233"),)
+    rename_id = uuid4().hex
+    rename = FolderRenameRecord(
+        rename_id,
+        profile.id,
+        "/source/Old",
+        "/source/New",
+        None,
+        FolderRenameState.STARTED,
+        "",
+        "",
+        target_slots,
+    )
+    store.start_folder_renames(profile.id, (rename,))
+    assert store.unfinished_folder_renames() == (
+        FolderRenameRecord(
+            rename_id,
+            profile.id,
+            "/source/Old",
+            "/source/New",
+            None,
+            FolderRenameState.STARTED,
+            "2025-01-02T03:04:05.123456Z",
+            "2025-01-02T03:04:05.123456Z",
+            target_slots,
+        ),
+    )
+
+    store.complete_folder_renames(
+        profile.id, (rename_id,), (("/source/Old", "/source/New"),), (), target_slots
+    )
+    copies = store.copy_records(profile.id, "/source/New")
+    assert [copy.destination_name for copy in copies] == ["one.jpg", "two.jpg"]
+    assert all(copy.destination_folder == "/source/New" for copy in copies)
+    assert _profile_slots(store, "/source") == target_slots
+    assert store.unfinished_folder_renames() == ()
+    with store._connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT state FROM folder_renames WHERE id = ?", (rename_id,)
+            ).fetchone()[0]
+            == "done"
+        )
+
+    store.remove_copy_records(profile.id, "/source/New", ("one.jpg",))
+    assert store.copy_records(profile.id, "/source/New") == (copies[1],)
+    cleared_slots = (Slot("KeyW", None, "#112233"),)
+    assert store.remove_destination_folder_records(profile.id, "/source/New", cleared_slots) == 1
+    assert store.copy_records(profile.id) == ()
+    assert _profile_slots(store, "/source") == cleared_slots
+
+    rolled_back_id = uuid4().hex
+    recovered_id = uuid4().hex
+    store.start_folder_renames(
+        profile.id,
+        (
+            FolderRenameRecord(
+                rolled_back_id,
+                profile.id,
+                "old-a",
+                "new-a",
+                None,
+                FolderRenameState.STARTED,
+                "",
+                "",
+            ),
+            FolderRenameRecord(
+                recovered_id, profile.id, "old-b", "new-b", None, FolderRenameState.STARTED, "", ""
+            ),
+        ),
+    )
+    store.mark_folder_renames_rolled_back((rolled_back_id,))
+    store.mark_folder_rename_recovered(recovered_id)
+    with store._connect() as connection:
+        states = dict(connection.execute("SELECT id, state FROM folder_renames"))
+    assert states[rolled_back_id] == "rolled_back"
+    assert states[recovered_id] == "recovered"
+
+
+def test_complete_folder_renames_rolls_back_on_target_conflict(tmp_path: Path, fixed_clock) -> None:
+    store = SQLiteStateStore(tmp_path / "app", fixed_clock)
+    store.load()
+    profile = store.create_profile_from_template("/source", "/source", DEFAULT_SLOTS)
+    old_copy = _add_copy(store, profile.id, "/source", "/source/Old", "old.jpg")
+    target_copy = _add_copy(store, profile.id, "/source", "/source/New", "existing.jpg")
+    rename_id = uuid4().hex
+    target_slots = (Slot("KeyW", "New", "#112233"),)
+    store.start_folder_renames(
+        profile.id,
+        (
+            FolderRenameRecord(
+                rename_id,
+                profile.id,
+                "/source/Old",
+                "/source/New",
+                None,
+                FolderRenameState.STARTED,
+                "",
+                "",
+                target_slots,
+            ),
+        ),
+    )
+
+    with pytest.raises(StateStoreError) as error:
+        store.complete_folder_renames(
+            profile.id, (rename_id,), (("/source/Old", "/source/New"),), (), target_slots
+        )
+    assert error.value.reason is StateStoreErrorReason.INVALID_DATA
+    assert set(store.copy_records(profile.id)) == {old_copy, target_copy}
+    assert _profile_slots(store, "/source") == DEFAULT_SLOTS
+    assert store.unfinished_folder_renames()[0].id == rename_id
 
 
 def test_unknown_sqlite_version_is_damaged_without_modifying_database(

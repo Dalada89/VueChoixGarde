@@ -7,6 +7,7 @@ from uuid import uuid4
 from vuechoixgarde.app.gate import OperationGate
 from vuechoixgarde.app.results import FileClassification, UseCaseStatus
 from vuechoixgarde.core.comparison import comparison_key
+from vuechoixgarde.core.destination import destination_folder_key
 from vuechoixgarde.core.sidecars import sidecars_for_image
 from vuechoixgarde.core.temp_names import temp_file_name
 from vuechoixgarde.core.toggle import (
@@ -472,7 +473,7 @@ def _toggle_on(
                         plan.profile_id,
                         str(plan.source_root),
                         target.source_name,
-                        str(destination),
+                        destination_folder_key(plan.source_root, destination.name),
                         item.final_name,
                         expected.size,
                         expected.sha256,

@@ -12,4 +12,7 @@
 - **Refresh:** the image list is a snapshot and is not watched continuously. Use Refresh after external changes.
 - **Display:** animated formats show only their first frame/page. No zoom, editing, video playback, RAW decoding or recursive scan is provided.
 - **Recovery:** recovery is journal-driven and conservative; ambiguous or externally modified files may remain pending for manual resolution rather than being changed.
+- **Folder name swaps:** two existing destination folders cannot exchange names in one save; use two separate saves so each no-replace rename has a free target.
+- **Filesystem rename support:** a filesystem without an atomic no-replace directory rename primitive cannot safely rename destinations; the app fails closed instead of falling back to a replacing rename.
+- **Destination deletion:** verified copies are permanently unlinked, not moved to the recycle bin. Folders with any foreign or changed entry are left intact and only detached from the profile.
 - **Performance:** documented local smoke measurements are informative only and are not a cross-platform performance guarantee.

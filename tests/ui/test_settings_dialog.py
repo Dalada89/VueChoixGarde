@@ -5,9 +5,10 @@ from PySide6.QtGui import QColor, QKeyEvent
 from PySide6.QtWidgets import QApplication, QColorDialog, QLabel
 from pytestqt.qtbot import QtBot
 
+from vuechoixgarde.app.results import FolderRename
 from vuechoixgarde.bootstrap import create_runtime
 from vuechoixgarde.core.slots import Slot
-from vuechoixgarde.ui.settings_dialog import SettingsDialog
+from vuechoixgarde.ui.settings_dialog import SettingsDialog, SettingsSubmission
 
 
 def _dialog(tmp_path: Path, *, read_only: bool = False):
@@ -69,22 +70,18 @@ def test_key_capture_uses_physical_position_and_persists_learned_label(
 
     assert button.position == "KeyQ"
     assert button.text() == "Q"
-    saved: list[tuple[bool, str, str, tuple[Slot, ...], tuple[tuple[str, str], ...]]] = []
+    saved: list[SettingsSubmission] = []
 
-    def capture_save(
-        reopen: bool,
-        direction: str,
-        target: str,
-        slots: tuple[Slot, ...],
-        labels: tuple[tuple[str, str], ...],
-    ) -> None:
-        saved.append((reopen, direction, target, slots, labels))
+    def capture_save(submission: SettingsSubmission) -> None:
+        saved.append(submission)
 
     dialog.on_save = capture_save
     dialog._save()
     assert saved
-    assert saved[0][3][0].key_position == "KeyQ"
-    assert ("KeyQ", "Q") in saved[0][4]
+    assert saved[0].global_slot_template[0].key_position == "KeyQ"
+    assert ("KeyQ", "Q") in saved[0].learned_key_labels
+    assert saved[0].language == runtime.service.settings.language
+    assert saved[0].sound_enabled == runtime.service.settings.sound_enabled
     dialog.reject()
     runtime.shutdown()
 
@@ -168,6 +165,48 @@ def test_color_swatch_updates_after_picker_selection(
     QApplication.processEvents()
     rendered = sample.grab().toImage().pixelColor(sample.width() // 2, sample.height() // 2).name()
     assert rendered == "#aa33cc"
+    dialog.reject()
+    runtime.shutdown()
+
+
+def test_submission_captures_profile_rename_and_delete_button_state(
+    qtbot: QtBot, tmp_path: Path
+) -> None:
+    runtime = create_runtime(tmp_path / "application-data")
+    runtime.service.save_preferences(
+        reopen_last_folder=False,
+        sort_direction="asc",
+        global_slot_template=(Slot("KeyW", "Saved", "#4488CC"),),
+    )
+    source = tmp_path / "source"
+    source.mkdir()
+    view = runtime.service.open_folder(source)
+    captured: list[SettingsSubmission] = []
+    dialog = SettingsDialog(
+        runtime.service.settings,
+        view.snapshot.profile,
+        runtime.service.profile_catalog(),
+        runtime.log_directory,
+        read_only=False,
+        on_save=captured.append,
+        on_profile_action=lambda *_args: None,
+        on_delete_request=lambda _index: None,
+    )
+    qtbot.addWidget(dialog)
+    editor = dialog.slot_editors["profile"]
+    name = editor.rows[0][1]
+    delete_button = editor.delete_controls[0][1]
+    assert delete_button.isEnabled()
+
+    name.setText("Renamed")
+    assert not delete_button.isEnabled()
+    dialog._save()
+
+    assert captured[0].renames == (FolderRename("Saved", "Renamed"),)
+    assert captured[0].profile_slots == (Slot("KeyW", "Renamed", "#4488CC"),)
+    dialog.set_busy(False)
+    name.setText("Saved")
+    assert delete_button.isEnabled()
     dialog.reject()
     runtime.shutdown()
 

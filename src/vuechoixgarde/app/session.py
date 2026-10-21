@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from vuechoixgarde.app.gate import OperationGate
 from vuechoixgarde.app.reconcile import reconcile
-from vuechoixgarde.app.recovery import recover_operations
+from vuechoixgarde.app.recovery import recover_folder_renames, recover_operations
 from vuechoixgarde.app.results import ReconcileItem, SessionSnapshot, SlotState
 from vuechoixgarde.core.comparison import comparison_key
 from vuechoixgarde.core.folder_names import validate_folder_name
@@ -135,11 +135,23 @@ class FolderSession:
                 logger=logger,
             )
             if register_available:
-                recovery = recover_operations(
+                rename_recovery = recover_folder_renames(
                     state, filesystem, profile.id, session.source_path, logger=logger
                 )
-                session.recovery_pending = bool(recovery.errors or recovery.pending)
-                session.reconcile(automatic=True, acquire_gate=False)
+                operation_recovery = recover_operations(
+                    state, filesystem, profile.id, session.source_path, logger=logger
+                )
+                session.recovery_pending = bool(
+                    rename_recovery.errors
+                    or rename_recovery.pending
+                    or operation_recovery.errors
+                    or operation_recovery.pending
+                )
+                recovered_profile = state.get_profile_by_identity(identity)
+                if recovered_profile is not None:
+                    session.profile = recovered_profile
+                if not session.recovery_pending:
+                    session.reconcile(automatic=True, acquire_gate=False)
             _safe_log(
                 logger,
                 LogLevel.INFO,

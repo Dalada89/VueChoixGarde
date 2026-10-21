@@ -14,7 +14,7 @@ from vuechoixgarde.core.temp_names import temp_file_name
 from vuechoixgarde.fsops.filesystem import LocalFileSystem
 from vuechoixgarde.fsops.lock import LocalFolderLock
 from vuechoixgarde.ports.errors import FileSystemError, FileSystemErrorReason
-from vuechoixgarde.ports.models import DestinationFault, DestinationStatus
+from vuechoixgarde.ports.models import DestinationFault, DestinationStatus, EntryKind
 
 
 def _make_exif_jpeg(path: Path) -> bytes:
@@ -504,3 +504,155 @@ def test_file_metadata_rejects_non_regular_file(tmp_path: Path) -> None:
         LocalFileSystem.file_metadata(root, folder)
     assert caught.value.reason is FileSystemErrorReason.IO_ERROR
     assert caught.value.detail == "not a regular file"
+
+
+def test_rename_destination_folder_moves_child_without_replacing(source_guard) -> None:
+    root = source_guard.root
+    old = root / "Old"
+    old.mkdir()
+    (old / "photo.jpg").write_bytes(b"managed bytes")
+    source_guard.seal(allowed_destinations={"Old", "New"})
+
+    result = LocalFileSystem.rename_destination_folder(root, "Old", "New")
+
+    assert result == root / "New"
+    assert not old.exists()
+    assert (result / "photo.jpg").read_bytes() == b"managed bytes"
+
+
+def test_case_only_destination_rename_uses_intermediate_name(source_guard) -> None:
+    root = source_guard.root
+    old = root / "Best"
+    old.mkdir()
+    (old / "photo.jpg").write_bytes(b"image")
+    source_guard.seal(allowed_destinations={"Best", "best"})
+
+    result = LocalFileSystem.rename_destination_folder(
+        root, "Best", "best", ".vcg-rename-test-intermediate"
+    )
+
+    assert result == root / "best"
+    assert result.is_dir()
+    assert (result / "photo.jpg").read_bytes() == b"image"
+    assert not (root / ".vcg-rename-test-intermediate").exists()
+
+
+@pytest.mark.parametrize("occupied_kind", ["file", "directory"])
+def test_destination_folder_rename_conflict_preserves_both_entries(
+    source_guard, occupied_kind: str
+) -> None:
+    root = source_guard.root
+    old = root / "Old"
+    old.mkdir()
+    (old / "contents").write_text("source", encoding="utf-8")
+    occupied = root / "New"
+    if occupied_kind == "file":
+        occupied.write_text("do not replace", encoding="utf-8")
+    else:
+        occupied.mkdir()
+        (occupied / "contents").write_text("keep", encoding="utf-8")
+    source_guard.seal()
+
+    with pytest.raises(FileSystemError) as caught:
+        LocalFileSystem.rename_destination_folder(root, "Old", "New")
+
+    assert caught.value.reason is FileSystemErrorReason.NAME_CONFLICT
+    assert (old / "contents").read_text(encoding="utf-8") == "source"
+    if occupied_kind == "file":
+        assert occupied.read_text(encoding="utf-8") == "do not replace"
+    else:
+        assert (occupied / "contents").read_text(encoding="utf-8") == "keep"
+
+
+def test_rename_rejects_link_and_reports_unsupported_noreplace(
+    source_guard, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = source_guard.root
+    real = root / "Real"
+    real.mkdir()
+    try:
+        (root / "Linked").symlink_to(real, target_is_directory=True)
+    except OSError as error:
+        source_guard.seal()
+        pytest.skip(f"symlink creation is unavailable: {error}")
+    source_guard.seal(allowed_destinations={"Real", "Renamed"})
+
+    with pytest.raises(FileSystemError) as linked:
+        LocalFileSystem.rename_destination_folder(root, "Linked", "Renamed")
+    assert linked.value.reason is FileSystemErrorReason.DESTINATION_LINK
+
+    if os.name != "nt":
+
+        def unsupported(*_args, **_kwargs):
+            raise OSError(errno.ENOSYS, "no atomic no-replace rename")
+
+        monkeypatch.setattr(filesystem, "_ctypes_no_replace", unsupported)
+        with pytest.raises(FileSystemError) as unavailable:
+            LocalFileSystem.rename_destination_folder(root, "Real", "Renamed")
+        assert unavailable.value.reason is FileSystemErrorReason.FINALIZE_UNSUPPORTED
+        assert real.is_dir()
+        assert not (root / "Renamed").exists()
+
+
+def test_destination_entries_classify_hidden_files_directories_and_links(source_guard) -> None:
+    root = source_guard.root
+    destination = root / "Best"
+    destination.mkdir()
+    (destination / "photo.jpg").write_bytes(b"image")
+    (destination / ".hidden").write_text("hidden", encoding="utf-8")
+    (destination / "nested").mkdir()
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(destination / "pipe")
+    try:
+        (destination / "linked").symlink_to(root / "photo.jpg")
+    except OSError as error:
+        source_guard.seal(allowed_destinations={"Best"})
+        pytest.skip(f"symlink creation is unavailable: {error}")
+    source_guard.seal(allowed_destinations={"Best"})
+
+    entries = LocalFileSystem.list_destination_entries(root, destination)
+
+    classified = {(entry.name, entry.kind) for entry in entries}
+    assert classified >= {
+        ("photo.jpg", EntryKind.FILE),
+        (".hidden", EntryKind.FILE),
+        ("nested", EntryKind.DIRECTORY),
+        ("linked", EntryKind.LINK),
+    }
+    if hasattr(os, "mkfifo"):
+        assert ("pipe", EntryKind.OTHER) in classified
+
+
+def test_remove_empty_destination_folder_and_refuse_nonempty(source_guard) -> None:
+    root = source_guard.root
+    empty = root / "Empty"
+    empty.mkdir()
+    nonempty = root / "Nonempty"
+    nonempty.mkdir()
+    child = nonempty / ".hidden"
+    child.write_bytes(b"keep")
+    source_guard.seal(allowed_destinations={"Empty", "Nonempty"})
+
+    LocalFileSystem.remove_empty_destination_folder(root, "Empty")
+    assert not empty.exists()
+    with pytest.raises(FileSystemError) as caught:
+        LocalFileSystem.remove_empty_destination_folder(root, "Nonempty")
+    assert caught.value.reason is FileSystemErrorReason.FOLDER_NOT_EMPTY
+    assert child.read_bytes() == b"keep"
+
+
+def test_remove_destination_folder_rejects_symlink(source_guard) -> None:
+    root = source_guard.root
+    real = root / "Real"
+    real.mkdir()
+    try:
+        (root / "Linked").symlink_to(real, target_is_directory=True)
+    except OSError as error:
+        source_guard.seal()
+        pytest.skip(f"symlink creation is unavailable: {error}")
+    source_guard.seal()
+
+    with pytest.raises(FileSystemError) as caught:
+        LocalFileSystem.remove_empty_destination_folder(root, "Linked")
+    assert caught.value.reason is FileSystemErrorReason.DESTINATION_LINK
+    assert real.is_dir()

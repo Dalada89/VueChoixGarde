@@ -17,6 +17,7 @@ import sys
 import unicodedata
 from pathlib import Path
 from typing import BinaryIO
+from uuid import uuid4
 
 from vuechoixgarde.core.comparison import comparison_key
 from vuechoixgarde.core.folder_names import validate_folder_name
@@ -24,9 +25,11 @@ from vuechoixgarde.core.formats import is_supported_image
 from vuechoixgarde.core.temp_names import is_reserved_temp_name
 from vuechoixgarde.ports.errors import FileSystemError, FileSystemErrorReason
 from vuechoixgarde.ports.models import (
+    DestinationEntry,
     DestinationFault,
     DestinationResolution,
     DestinationStatus,
+    EntryKind,
     FileFingerprint,
     FileMetadata,
     SourceScan,
@@ -373,6 +376,175 @@ def list_destination_names(source_root: Path, destination_folder: Path) -> tuple
     return _destination_names(destination)
 
 
+def _verified_destination_child(source_root: Path, exact_name: str) -> tuple[Path, Path]:
+    """Resolve one exact, real direct-child destination folder without following links."""
+    if not _is_simple_name(exact_name):
+        raise _raise_fs_error(FileSystemErrorReason.INVALID_NAME, source_root / exact_name)
+    root = _source_root(source_root)
+    candidate = extended_path(root / exact_name)
+    try:
+        candidate_stat = candidate.lstat()
+    except OSError as error:
+        if isinstance(error, FileNotFoundError):
+            raise _raise_fs_error(FileSystemErrorReason.DESTINATION_FILE, candidate) from error
+        raise _raise_fs_error(FileSystemErrorReason.IO_ERROR, candidate, str(error)) from error
+    if _is_link_or_junction(candidate):
+        raise _raise_fs_error(FileSystemErrorReason.DESTINATION_LINK, candidate)
+    if not is_inside(candidate, root):
+        raise _raise_fs_error(FileSystemErrorReason.DESTINATION_OUTSIDE, candidate)
+    if not stat.S_ISDIR(candidate_stat.st_mode):
+        raise _raise_fs_error(FileSystemErrorReason.DESTINATION_FILE, candidate)
+    if exact_name not in _destination_names(root):
+        raise _raise_fs_error(FileSystemErrorReason.DESTINATION_FILE, candidate)
+    return root, candidate
+
+
+def _rename_directory_no_replace(source: Path, target: Path) -> None:
+    """Use only platform-specific no-replace directory rename primitives."""
+    if sys.platform == "win32":
+        extended_path(source).rename(extended_path(target))
+        return
+    _ctypes_no_replace(source, target)
+
+
+def _raise_rename_os_error(error: OSError, path: Path) -> FileSystemError:
+    if isinstance(error, FileExistsError) or error.errno in {
+        errno.EEXIST,
+        errno.ENOTEMPTY,
+    }:
+        return _raise_fs_error(FileSystemErrorReason.NAME_CONFLICT, path, str(error))
+    if sys.platform != "win32" and error.errno in {errno.ENOSYS, errno.EINVAL}:
+        return _raise_fs_error(FileSystemErrorReason.FINALIZE_UNSUPPORTED, path, str(error))
+    return _raise_fs_error(FileSystemErrorReason.IO_ERROR, path, str(error))
+
+
+def rename_destination_folder(
+    source_root: Path,
+    old_exact_name: str,
+    new_name: str,
+    intermediate_name: str | None = None,
+) -> Path:
+    """Rename one verified direct child without replacement (FR-100, NFR-002)."""
+    root, old_path = _verified_destination_child(source_root, old_exact_name)
+    name_error = validate_folder_name(new_name)
+    if name_error is not None:
+        raise _raise_fs_error(FileSystemErrorReason.INVALID_NAME, root / new_name, str(name_error))
+
+    existing_names = _destination_names(root)
+    if any(
+        name != old_exact_name and comparison_key(name) == comparison_key(new_name)
+        for name in existing_names
+    ):
+        raise _raise_fs_error(FileSystemErrorReason.NAME_CONFLICT, root / new_name)
+    if old_exact_name == new_name:
+        return root / new_name
+
+    case_only = comparison_key(old_exact_name) == comparison_key(new_name)
+    if case_only:
+        if intermediate_name is None:
+            intermediate_name = f".vcg-rename-{uuid4().hex}"
+        if not _is_simple_name(intermediate_name):
+            raise _raise_fs_error(FileSystemErrorReason.INVALID_NAME, root / intermediate_name)
+        if any(
+            comparison_key(name) == comparison_key(intermediate_name) for name in existing_names
+        ):
+            raise _raise_fs_error(FileSystemErrorReason.NAME_CONFLICT, root / intermediate_name)
+        assert intermediate_name is not None
+
+    final_path = root / new_name
+    if case_only:
+        assert intermediate_name is not None
+        intermediate_path = root / intermediate_name
+        try:
+            _rename_directory_no_replace(old_path, intermediate_path)
+            _rename_directory_no_replace(intermediate_path, final_path)
+        except OSError as error:
+            if intermediate_path.exists():
+                try:
+                    _rename_directory_no_replace(intermediate_path, old_path)
+                except OSError as rollback_error:
+                    raise _raise_fs_error(
+                        FileSystemErrorReason.IO_ERROR,
+                        intermediate_path,
+                        f"rename failed: {error}; rollback failed: {rollback_error}",
+                    ) from rollback_error
+            raise _raise_rename_os_error(error, final_path) from error
+    else:
+        try:
+            _rename_directory_no_replace(old_path, final_path)
+        except OSError as error:
+            raise _raise_rename_os_error(error, final_path) from error
+
+    try:
+        collisions = tuple(
+            name
+            for name in _destination_names(root)
+            if name != new_name and comparison_key(name) == comparison_key(new_name)
+        )
+    except FileSystemError as error:
+        try:
+            _rename_directory_no_replace(final_path, old_path)
+        except OSError as rollback_error:
+            raise _raise_fs_error(
+                FileSystemErrorReason.IO_ERROR,
+                final_path,
+                f"post-rename check failed: {error}; rollback failed: {rollback_error}",
+            ) from rollback_error
+        raise
+    if collisions:
+        try:
+            _rename_directory_no_replace(final_path, old_path)
+        except OSError as error:
+            raise _raise_fs_error(
+                FileSystemErrorReason.IO_ERROR,
+                final_path,
+                f"collision appeared during rename; rollback failed: {error}",
+            ) from error
+        raise _raise_fs_error(FileSystemErrorReason.NAME_CONFLICT, final_path)
+    return final_path
+
+
+def list_destination_entries(
+    source_root: Path, destination_folder: Path
+) -> tuple[DestinationEntry, ...]:
+    """List all direct entries, including hidden ones, classified without following links."""
+    destination = _contained_destination(source_root, destination_folder)
+    classified: list[DestinationEntry] = []
+    try:
+        with os.scandir(extended_path(destination)) as entries:
+            for entry in entries:
+                entry_path = Path(entry.path)
+                if entry.is_symlink() or _entry_is_junction(entry_path):
+                    kind = EntryKind.LINK
+                else:
+                    entry_stat = entry.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(entry_stat.st_mode):
+                        kind = EntryKind.DIRECTORY
+                    elif stat.S_ISREG(entry_stat.st_mode):
+                        kind = EntryKind.FILE
+                    else:
+                        kind = EntryKind.OTHER
+                classified.append(DestinationEntry(entry.name, kind))
+    except OSError as error:
+        raise _raise_fs_error(
+            FileSystemErrorReason.IO_ERROR, destination_folder, str(error)
+        ) from error
+    return tuple(classified)
+
+
+def remove_empty_destination_folder(source_root: Path, exact_name: str) -> None:
+    """Remove one verified direct child folder, and never recursively remove contents."""
+    _, destination = _verified_destination_child(source_root, exact_name)
+    try:
+        extended_path(destination).rmdir()
+    except OSError as error:
+        if error.errno in {errno.ENOTEMPTY, errno.EEXIST}:
+            raise _raise_fs_error(
+                FileSystemErrorReason.FOLDER_NOT_EMPTY, destination, str(error)
+            ) from error
+        raise _raise_fs_error(FileSystemErrorReason.IO_ERROR, destination, str(error)) from error
+
+
 def copy_to_temp(
     source_root: Path, destination_folder: Path, source_name: str, temp_name: str
 ) -> FileFingerprint:
@@ -609,6 +781,9 @@ class LocalFileSystem:
     resolve_destination_folder = staticmethod(resolve_destination_folder)
     create_destination_folder = staticmethod(create_destination_folder)
     list_destination_names = staticmethod(list_destination_names)
+    rename_destination_folder = staticmethod(rename_destination_folder)
+    list_destination_entries = staticmethod(list_destination_entries)
+    remove_empty_destination_folder = staticmethod(remove_empty_destination_folder)
     fingerprint_file = staticmethod(fingerprint_file)
     file_metadata = staticmethod(file_metadata)
     copy_to_temp = staticmethod(copy_to_temp)

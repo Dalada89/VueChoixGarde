@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Protocol
 
 from vuechoixgarde.ports.models import (
+    DestinationEntry,
     DestinationResolution,
     FileFingerprint,
     FileMetadata,
@@ -44,6 +45,26 @@ class FileSystemPort(Protocol):
         self, source_root: Path, destination_folder: Path
     ) -> tuple[str, ...]:
         """List exact names directly in a contained destination folder (FR-047)."""
+        ...
+
+    def rename_destination_folder(
+        self,
+        source_root: Path,
+        old_exact_name: str,
+        new_name: str,
+        intermediate_name: str | None = None,
+    ) -> Path:
+        """Rename a direct child folder without replacement or following links."""
+        ...
+
+    def list_destination_entries(
+        self, source_root: Path, destination_folder: Path
+    ) -> tuple[DestinationEntry, ...]:
+        """Classify direct destination entries without following links."""
+        ...
+
+    def remove_empty_destination_folder(self, source_root: Path, exact_name: str) -> None:
+        """Remove only an empty, verified direct destination child folder."""
         ...
 
     def fingerprint_file(self, source_root: Path, path: Path) -> FileFingerprint:

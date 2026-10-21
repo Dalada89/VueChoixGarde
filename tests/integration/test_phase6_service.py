@@ -39,7 +39,7 @@ def test_failed_last_folder_save_is_logged_and_shown_without_path_leakage(
         runtime.shutdown()
 
 
-def test_renamed_destination_is_reported_without_moving_files(tmp_path: Path) -> None:
+def test_unassigned_destination_is_reported_without_moving_files(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     image = source / "photo.png"
@@ -62,7 +62,7 @@ def test_renamed_destination_is_reported_without_moving_files(tmp_path: Path) ->
             changed_view.generation,
         )
 
-        assert status.warning == "destination_renamed"
+        assert status.warning == "destination_unassigned"
         assert (source / "Before" / image.name).is_file()
         assert not (source / "After").exists()
         assert copied_view.snapshot.profile.id == changed_view.snapshot.profile.id

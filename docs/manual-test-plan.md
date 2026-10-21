@@ -34,6 +34,10 @@ This plan supplements automated unit/integration/UI tests. Complete it on physic
 | 18 | Missing app data initializes; damaged data is preserved and causes no deletion | | | | |
 | 19 | No writes outside source folder and application data, including symlink cases | | | | |
 | 20 | JSONL logs parse and contain no image metadata | | | | |
+| 21 | Saving a changed name on an existing profile slot physically renames the direct folder and updates selections/register paths; unrelated folders and source files remain unchanged | | | | |
+| 22 | Interrupt a folder rename at journal-only, intermediate and completed stages; reopen and confirm recovery is consistent before reconciliation | | | | |
+| 23 | Delete confirmation defaults to Cancel; Escape cancels without deleting files, folders, slots or register entries | | | | |
+| 24 | Folder with foreign/modified/hidden entries is detached only; confirm every entry and the folder remain byte-for-byte unchanged | | | | |
 
 ## Release-specific checks
 
@@ -44,6 +48,8 @@ This plan supplements automated unit/integration/UI tests. Complete it on physic
 | Sound resource resolves; audio backend failure does not stop sorting | | | | |
 | HEIC/HEIF sample decode and orientation, if available | | | | |
 | Keyboard layouts, AltGr, dead keys, key repeat and text-field focus | | | | |
+| Rename while destination is open/locked in Explorer; fail cleanly and retain a consistent profile | N/A | | N/A | Windows-specific |
+| APFS case-only folder rename (e.g. `Before` → `bEFORE`) through the journaled intermediate name | N/A | N/A | | macOS-specific |
 | Unsigned-app warning and documented launch path | | | | |
 
 Automated CI can execute filesystem and UI tests on hosted runners but is not a substitute for physical keyboard/layout validation. Do not fill in results until the corresponding test was performed.

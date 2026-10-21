@@ -7,6 +7,7 @@ from typing import Protocol
 from vuechoixgarde.core.slots import Slot
 from vuechoixgarde.ports.models import (
     CopyRecord,
+    FolderRenameRecord,
     OperationFileRecord,
     OperationRecord,
     ProfileRecord,
@@ -45,6 +46,47 @@ class StateStore(Protocol):
 
     def replace_profile_slots(self, profile_id: str, slots: Sequence[Slot]) -> ProfileRecord:
         """Replace all profile slots atomically and return the updated profile."""
+        ...
+
+    def start_folder_renames(
+        self, profile_id: str, records: tuple[FolderRenameRecord, ...]
+    ) -> None:
+        """Persist all started rename journal rows for one profile atomically."""
+        ...
+
+    def complete_folder_renames(
+        self,
+        profile_id: str,
+        rename_ids: tuple[str, ...],
+        folder_updates: tuple[tuple[str, str], ...],
+        removed_folders: tuple[str, ...],
+        slots: tuple[Slot, ...],
+    ) -> None:
+        """Update register, slots, and rename journal rows atomically."""
+        ...
+
+    def mark_folder_renames_rolled_back(self, rename_ids: tuple[str, ...]) -> None:
+        """Mark started rename journal rows as rolled back."""
+        ...
+
+    def mark_folder_rename_recovered(self, rename_id: str) -> None:
+        """Mark a started rename journal row as recovered."""
+        ...
+
+    def unfinished_folder_renames(self) -> tuple[FolderRenameRecord, ...]:
+        """Return rename journal rows still in the started state."""
+        ...
+
+    def remove_destination_folder_records(
+        self, profile_id: str, destination_folder: str, slots: tuple[Slot, ...]
+    ) -> int:
+        """Remove all records for a folder and replace profile slots atomically."""
+        ...
+
+    def remove_copy_records(
+        self, profile_id: str, destination_folder: str, names: tuple[str, ...]
+    ) -> None:
+        """Remove the selected copy register records for one destination folder."""
         ...
 
     def orphaned_profiles(self, folder_exists: Callable[[str], bool]) -> tuple[ProfileRecord, ...]:

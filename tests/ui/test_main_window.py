@@ -5,9 +5,11 @@ from time import sleep
 from PIL import Image
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QKeyEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QLineEdit, QMessageBox
 from pytestqt.qtbot import QtBot
 
+from vuechoixgarde.app.results import FolderDeletionCase, FolderDeletionCheck
 from vuechoixgarde.bootstrap import create_runtime
 from vuechoixgarde.ui.main_window import MainWindow
 
@@ -46,6 +48,39 @@ def _fill_name_dialog() -> bool:
         return False
     button.click()
     return True
+
+
+def test_folder_delete_confirmation_defaults_to_cancel_and_shows_foreign_names(
+    qtbot: QtBot, tmp_path: Path
+) -> None:
+    window = MainWindow(create_runtime(tmp_path / "app-data"))
+    qtbot.addWidget(window)
+    check = FolderDeletionCheck(
+        FolderDeletionCase.FOREIGN_ENTRIES,
+        0,
+        "Target",
+        (),
+        ("<unexpected>.jpg",),
+        "fingerprint",
+    )
+    observed: dict[str, object] = {}
+
+    def cancel_confirmation() -> None:
+        box = QApplication.activeModalWidget()
+        assert isinstance(box, QMessageBox)
+        cancel_button = box.button(QMessageBox.StandardButton.Cancel)
+        observed["default"] = box.defaultButton() == cancel_button
+        observed["escape"] = box.escapeButton() == cancel_button
+        observed["format"] = box.textFormat()
+        observed["informative"] = box.informativeText()
+        QTest.keyClick(box, Qt.Key.Key_Escape)
+
+    QTimer.singleShot(0, cancel_confirmation)
+    assert not window._ask_folder_delete_confirmation(window, check)
+    assert observed["default"] is True
+    assert observed["escape"] is True
+    assert observed["format"] is Qt.TextFormat.PlainText
+    assert "<unexpected>.jpg" in str(observed["informative"])
 
 
 def test_main_window_opens_displays_navigates_and_shuts_down(qtbot: QtBot, tmp_path: Path) -> None:

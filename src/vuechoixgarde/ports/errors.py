@@ -17,6 +17,7 @@ class FileSystemErrorReason(StrEnum):
     AMBIGUOUS = "ambiguous"
     INVALID_NAME = "invalid_name"
     NAME_CONFLICT = "name_conflict"
+    FOLDER_NOT_EMPTY = "folder_not_empty"
     INVALID_TEMP_NAME = "invalid_temp_name"
     COPY_FAILED = "copy_failed"
     FILE_CHANGED = "file_changed"

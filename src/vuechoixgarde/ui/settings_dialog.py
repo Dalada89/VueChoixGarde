@@ -1,6 +1,7 @@
 """General settings, slot editing, and explicit profile management dialog."""
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import override
 
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from vuechoixgarde.app.results import FolderRename
 from vuechoixgarde.app.service import ProfileSummary
 from vuechoixgarde.core.folder_names import FolderNameError
 from vuechoixgarde.core.keys import (
@@ -40,6 +42,21 @@ from vuechoixgarde.ports.models import ProfileRecord, Settings
 from vuechoixgarde.ui.keyboard import keyboard_event_data
 from vuechoixgarde.ui.style import contrast_ratio
 from vuechoixgarde.ui.texts import text
+
+
+@dataclass(frozen=True)
+class SettingsSubmission:
+    """Immutable values copied from widgets before the file worker starts."""
+
+    reopen_last_folder: bool
+    sort_direction: str
+    language: str
+    sound_enabled: bool
+    global_slot_template: tuple[Slot, ...]
+    profile_slots: tuple[Slot, ...] | None
+    learned_key_labels: tuple[tuple[str, str], ...]
+    renames: tuple[FolderRename, ...]
+
 
 _NAME_ERROR_TEXT = {
     FolderNameError.EMPTY: "name_empty",
@@ -97,10 +114,23 @@ class _KeyCaptureButton(QPushButton):
 class _SlotEditor(QWidget):
     validation_changed = Signal(bool)
 
-    def __init__(self, slots: tuple[Slot, ...], labels: dict[str, str], read_only: bool) -> None:
+    def __init__(
+        self,
+        slots: tuple[Slot, ...],
+        labels: dict[str, str],
+        read_only: bool,
+        *,
+        track_renames: bool = False,
+        on_delete_request: Callable[[int], None] | None = None,
+    ) -> None:
         super().__init__()
         self.labels = labels
         self.read_only = read_only
+        self.track_renames = track_renames
+        self.on_delete_request = on_delete_request
+        self.busy = False
+        self.row_origins: dict[QLineEdit, str | None] = {}
+        self.delete_controls: list[tuple[QLineEdit, QPushButton, str | None]] = []
         self.rows: list[tuple[_KeyCaptureButton, QLineEdit, QPushButton, QLabel]] = []
         self.row_layout = QVBoxLayout()
         self.rows_host = QWidget()
@@ -123,7 +153,7 @@ class _SlotEditor(QWidget):
         layout.addWidget(self.validation)
         layout.addLayout(controls)
         for slot in slots:
-            self._append_row(slot)
+            self._append_row(slot, slot.destination_name if track_renames else None)
         self.set_read_only(read_only)
         self._update_validation()
 
@@ -131,6 +161,17 @@ class _SlotEditor(QWidget):
         return tuple(
             Slot(key.position, name.text() or None, str(color.property("slotColor")))
             for key, name, color, _ in self.rows
+        )
+
+    def renames(self) -> tuple[FolderRename, ...]:
+        if not self.track_renames:
+            return ()
+        return tuple(
+            FolderRename(origin, name.text())
+            for _, name, _, _ in self.rows
+            if (origin := self.row_origins.get(name)) is not None
+            and name.text()
+            and origin != name.text()
         )
 
     def set_read_only(self, value: bool) -> None:
@@ -141,24 +182,45 @@ class _SlotEditor(QWidget):
             key.setEnabled(not value)
             name.setReadOnly(value)
             color.setEnabled(not value)
+        self._update_delete_controls()
+
+    def set_busy(self, value: bool) -> None:
+        self.busy = value
+        self._update_delete_controls()
+
+    def _update_delete_controls(self) -> None:
+        for name, button, origin in self.delete_controls:
+            button.setEnabled(
+                not self.read_only
+                and not self.busy
+                and origin is not None
+                and name.text() == origin
+            )
 
     def add_row(self) -> None:
         if len(self.rows) >= 12:
             return
         existing = {key.position for key, _, _, _ in self.rows}
         position = next((code for code in ALLOWED_SLOT_CODES if code not in existing), "KeyW")
-        self._append_row(Slot(position, None, "#64B5F6"))
+        self._append_row(Slot(position, None, "#64B5F6"), None)
         self._update_validation()
 
     def remove_row(self) -> None:
         if len(self.rows) <= 1:
             return
         row = self.rows.pop()
+        removed_name = row[1]
         for widget in row:
             widget.deleteLater()
+        for name, button, _origin in self.delete_controls:
+            if name is removed_name:
+                button.deleteLater()
+        self.delete_controls = [
+            control for control in self.delete_controls if control[0] is not removed_name
+        ]
         self._update_validation()
 
-    def _append_row(self, slot: Slot) -> None:
+    def _append_row(self, slot: Slot, origin_name: str | None) -> None:
         row_widget = QFrame()
         row_widget.setObjectName("slotEditorRow")
         row = QHBoxLayout(row_widget)
@@ -189,8 +251,21 @@ class _SlotEditor(QWidget):
         row.addWidget(color)
         row.addWidget(sample)
         row.addWidget(errors, 1)
+        delete_callback = self.on_delete_request
+        if self.track_renames and delete_callback is not None:
+            delete_button = QPushButton(text("delete_folder_button"), row_widget)
+            delete_button.setObjectName("deleteDestinationFolderButton")
+            label = displayed_key_label(slot.key_position, self.labels) or "?"
+            delete_button.setAccessibleName(text("delete_folder_accessible", key=label))
+            row_index = len(self.rows)
+            delete_button.clicked.connect(
+                lambda _checked=False, index=row_index: delete_callback(index)
+            )
+            row.addWidget(delete_button)
+            self.delete_controls.append((name, delete_button, origin_name))
         self.row_layout.addWidget(row_widget)
         self.rows.append((key, name, color, errors))
+        self.row_origins[name] = origin_name
         name.textChanged.connect(self._update_validation)
         key.clicked.connect(self._update_validation)
         key.captured.connect(self._update_validation)
@@ -230,6 +305,7 @@ class _SlotEditor(QWidget):
         self.validation.setText(text("slot_profile_invalid") if issues else "")
         self.add_button.setEnabled(not self.read_only and len(self.rows) < 12)
         self.remove_button.setEnabled(not self.read_only and len(self.rows) > 1)
+        self._update_delete_controls()
         self.validation_changed.emit(not issues)
 
 
@@ -259,8 +335,9 @@ class SettingsDialog(QDialog):
         log_directory: Path,
         *,
         read_only: bool,
-        on_save: Callable[[bool, str, str, tuple[Slot, ...], tuple[tuple[str, str], ...]], None],
+        on_save: Callable[[SettingsSubmission], None],
         on_profile_action: Callable[[str, str | None], None],
+        on_delete_request: Callable[[int], None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -271,6 +348,9 @@ class SettingsDialog(QDialog):
         self.read_only = read_only
         self.on_save = on_save
         self.on_profile_action = on_profile_action
+        self.on_delete_request = on_delete_request
+        self._busy = False
+        self._busy_action_enabled: dict[QPushButton, bool] = {}
         self.setWindowTitle(text("settings"))
         self.resize(900, 620)
         layout = QVBoxLayout(self)
@@ -304,7 +384,7 @@ class SettingsDialog(QDialog):
             valid = all(
                 not validate_slot_profile(editor.slots()) for editor in self.slot_editors.values()
             )
-            self.save_button.setEnabled(not self.read_only and valid)
+            self.save_button.setEnabled(not self._busy and not self.read_only and valid)
 
     def refresh_profiles(self, profiles: tuple[ProfileSummary, ...]) -> None:
         self.profiles = profiles
@@ -318,6 +398,47 @@ class SettingsDialog(QDialog):
 
     def set_message(self, value: str) -> None:
         self.message.setText(value)
+
+    def update_profile(self, profile: ProfileRecord) -> None:
+        self.profile = profile
+        previous = self.slot_editors.get("profile")
+        if previous is None:
+            return
+        updated = _SlotEditor(
+            profile.slots,
+            dict(self.settings.learned_key_labels),
+            self.read_only,
+            track_renames=True,
+            on_delete_request=self.on_delete_request,
+        )
+        updated.set_busy(self._busy)
+        updated.validation_changed.connect(self._set_save_enabled)
+        position = self.slot_stack.indexOf(previous)
+        self.slot_stack.insertWidget(position, updated)
+        if self.slot_stack.currentWidget() is previous:
+            self.slot_stack.setCurrentWidget(updated)
+        self.slot_editors["profile"] = updated
+        previous.deleteLater()
+        self._set_save_enabled()
+
+    def set_busy(self, value: bool) -> None:
+        if value == self._busy:
+            return
+        self._busy = value
+        for editor in self.slot_editors.values():
+            editor.set_busy(value)
+        buttons = [*self.action_buttons.values()]
+        if self.save_button is not None:
+            buttons.append(self.save_button)
+        if value:
+            self._busy_action_enabled = {button: button.isEnabled() for button in buttons}
+            for button in buttons:
+                button.setEnabled(False)
+            return
+        for button, enabled in self._busy_action_enabled.items():
+            button.setEnabled(enabled)
+        self._busy_action_enabled.clear()
+        self._set_save_enabled()
 
     def _build_general(self, settings: Settings) -> QWidget:
         page = QWidget()
@@ -367,7 +488,11 @@ class SettingsDialog(QDialog):
         }
         if profile is not None:
             self.slot_editors["profile"] = _SlotEditor(
-                profile.slots, dict(settings.learned_key_labels), read_only
+                profile.slots,
+                dict(settings.learned_key_labels),
+                read_only,
+                track_renames=True,
+                on_delete_request=self.on_delete_request,
             )
         self.slot_stack = QStackedWidget(page)
         for editor in self.slot_editors.values():
@@ -447,6 +572,8 @@ class SettingsDialog(QDialog):
         table.resizeColumnsToContents()
 
     def _profile_action(self, action: str) -> None:
+        if self._busy:
+            return
         profile_id = self._selected_profile_id()
         if action in {
             "reset_global_template",
@@ -476,6 +603,7 @@ class SettingsDialog(QDialog):
             if not self._confirm(action):
                 return
         self.set_message(text("profile_action_working"))
+        self.set_busy(True)
         self.on_profile_action(action, profile_id)
 
     def _confirm(self, action: str) -> bool:
@@ -499,8 +627,8 @@ class SettingsDialog(QDialog):
         return str(item.data(Qt.ItemDataRole.UserRole)) if item is not None else None
 
     def _save(self) -> None:
-        target = self.slot_target.currentData()
-        slots = self.slot_editor.slots()
+        if self._busy:
+            return
         invalid_target = next(
             (
                 name
@@ -514,14 +642,22 @@ class SettingsDialog(QDialog):
             self.tabs.setCurrentWidget(self.slot_tab)
             self.set_message(text("slot_profile_invalid"))
             return
-        direction = str(self.sort_combo.currentData())
-        self.on_save(
-            self.reopen_checkbox.isChecked(),
-            direction,
-            str(target),
-            slots,
-            tuple(sorted(self.slot_editor.labels.items())),
+        profile_editor = self.slot_editors.get("profile")
+        all_labels: dict[str, str] = {}
+        for editor in self.slot_editors.values():
+            all_labels.update(editor.labels)
+        submission = SettingsSubmission(
+            reopen_last_folder=self.reopen_checkbox.isChecked(),
+            sort_direction=str(self.sort_combo.currentData()),
+            language=str(self.language_combo.currentData()),
+            sound_enabled=self.sound_checkbox.isChecked(),
+            global_slot_template=self.slot_editors["template"].slots(),
+            profile_slots=profile_editor.slots() if profile_editor is not None else None,
+            learned_key_labels=tuple(sorted(all_labels.items())),
+            renames=profile_editor.renames() if profile_editor is not None else (),
         )
+        self.set_busy(True)
+        self.on_save(submission)
 
     def open_log_folder(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.log_directory)))

@@ -1,8 +1,10 @@
 """SQLite profiles, copy register, and journal persistence (Technical Design 6.3)."""
 
+import json
 import sqlite3
 import uuid
 from collections.abc import Callable, Sequence
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,6 +14,8 @@ from vuechoixgarde.ports.clock import Clock
 from vuechoixgarde.ports.errors import SettingsStoreError, StateStoreError, StateStoreErrorReason
 from vuechoixgarde.ports.models import (
     CopyRecord,
+    FolderRenameRecord,
+    FolderRenameState,
     LoadStatus,
     OperationFileRecord,
     OperationRecord,
@@ -22,7 +26,7 @@ from vuechoixgarde.ports.models import (
 from vuechoixgarde.store.damage import quarantine_damaged
 from vuechoixgarde.store.paths import prepare_application_data
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 def _iso_utc(value: datetime) -> str:
@@ -94,6 +98,34 @@ def _migration_0_to_1(connection: sqlite3.Connection) -> None:
         raise
 
 
+def _migration_1_to_2(connection: sqlite3.Connection) -> None:
+    """Add the durable destination-folder rename journal."""
+    try:
+        connection.executescript(
+            """
+            BEGIN IMMEDIATE;
+            CREATE TABLE folder_renames (
+                id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                old_folder TEXT NOT NULL,
+                new_folder TEXT NOT NULL,
+                intermediate_folder TEXT,
+                target_slots_json TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (
+                    state IN ('started', 'done', 'rolled_back', 'recovered')
+                ),
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            PRAGMA user_version = 2;
+            COMMIT;
+            """
+        )
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+
+
 class SQLiteStateStore:
     """A short-lived-connection SQLite implementation of `StateStore`."""
 
@@ -150,6 +182,9 @@ class SQLiteStateStore:
                     )
                 if version == 0:
                     _migration_0_to_1(connection)
+                    version = 1
+                if version == 1:
+                    _migration_1_to_2(connection)
                 connection.execute("PRAGMA journal_mode = WAL")
                 connection.execute("PRAGMA foreign_keys = ON")
             finally:
@@ -229,6 +264,24 @@ class SQLiteStateStore:
                 for index, slot in enumerate(slots)
             ],
         )
+
+    def _replace_slots(
+        self,
+        connection: sqlite3.Connection,
+        profile_id: str,
+        slots: tuple[Slot, ...],
+        timestamp: str,
+    ) -> ProfileRecord:
+        changed = connection.execute(
+            "UPDATE profiles SET updated_at = ? WHERE id = ?", (timestamp, profile_id)
+        ).rowcount
+        if not changed:
+            raise StateStoreError(StateStoreErrorReason.PROFILE_NOT_FOUND, detail=profile_id)
+        connection.execute("DELETE FROM slots WHERE profile_id = ?", (profile_id,))
+        self._insert_slots(connection, profile_id, slots)
+        row = connection.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,)).fetchone()
+        assert row is not None
+        return self._read_profile(connection, row)
 
     @staticmethod
     def _read_profile(connection: sqlite3.Connection, row: sqlite3.Row) -> ProfileRecord:
@@ -338,23 +391,251 @@ class SQLiteStateStore:
         try:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                changed = connection.execute(
-                    "UPDATE profiles SET updated_at = ? WHERE id = ?",
-                    (self._timestamp(), profile_id),
-                ).rowcount
-                if not changed:
-                    raise StateStoreError(
-                        StateStoreErrorReason.PROFILE_NOT_FOUND, detail=profile_id
-                    )
-                connection.execute("DELETE FROM slots WHERE profile_id = ?", (profile_id,))
-                self._insert_slots(connection, profile_id, frozen_slots)
-                row = connection.execute(
-                    "SELECT * FROM profiles WHERE id = ?", (profile_id,)
-                ).fetchone()
-                assert row is not None
-                return self._read_profile(connection, row)
+                return self._replace_slots(connection, profile_id, frozen_slots, self._timestamp())
         except StateStoreError:
             raise
+        except sqlite3.Error as error:
+            raise StateStoreError(
+                StateStoreErrorReason.IO_ERROR, path=self.path, detail=str(error)
+            ) from error
+
+    @staticmethod
+    def _slots_json(slots: Sequence[Slot]) -> str:
+        return json.dumps(
+            [
+                {
+                    "key_position": slot.key_position,
+                    "destination_name": slot.destination_name,
+                    "color": slot.color,
+                }
+                for slot in slots
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _slots_from_json(value: str) -> tuple[Slot, ...]:
+        try:
+            decoded = json.loads(value)
+            if not isinstance(decoded, list):
+                raise ValueError("slot data must be a list")
+            slots = tuple(
+                Slot(item["key_position"], item["destination_name"], item["color"])
+                for item in decoded
+                if isinstance(item, dict)
+            )
+            if len(slots) != len(decoded):
+                raise ValueError("slot data contains an invalid entry")
+            return slots
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise StateStoreError(
+                StateStoreErrorReason.INVALID_DATA, detail="invalid target slots in rename journal"
+            ) from error
+
+    def start_folder_renames(
+        self, profile_id: str, records: tuple[FolderRenameRecord, ...]
+    ) -> None:
+        """Insert a set of started folder-rename records in one transaction."""
+        timestamp = self._timestamp()
+        if any(
+            record.profile_id != profile_id or record.state is not FolderRenameState.STARTED
+            for record in records
+        ):
+            raise StateStoreError(
+                StateStoreErrorReason.INVALID_DATA, detail="invalid rename record"
+            )
+        try:
+            with closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.executemany(
+                    "INSERT INTO folder_renames("
+                    "id, profile_id, old_folder, new_folder, intermediate_folder, "
+                    "target_slots_json, state, started_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'started', ?, ?)",
+                    [
+                        (
+                            record.id,
+                            profile_id,
+                            record.old_folder,
+                            record.new_folder,
+                            record.intermediate_folder,
+                            self._slots_json(record.target_slots),
+                            record.started_at or timestamp,
+                            record.updated_at or timestamp,
+                        )
+                        for record in records
+                    ],
+                )
+                connection.commit()
+        except StateStoreError:
+            raise
+        except sqlite3.Error as error:
+            raise StateStoreError(
+                StateStoreErrorReason.IO_ERROR, path=self.path, detail=str(error)
+            ) from error
+
+    def complete_folder_renames(
+        self,
+        profile_id: str,
+        rename_ids: tuple[str, ...],
+        folder_updates: tuple[tuple[str, str], ...],
+        removed_folders: tuple[str, ...],
+        slots: tuple[Slot, ...],
+    ) -> None:
+        """Atomically update copy paths and slots and close the rename journal."""
+        frozen_slots = self._validate_slots(slots)
+        timestamp = self._timestamp()
+        if len(set(rename_ids)) != len(rename_ids):
+            raise StateStoreError(StateStoreErrorReason.INVALID_DATA, detail="duplicate rename ID")
+        if len({new for _, new in folder_updates}) != len(folder_updates):
+            raise StateStoreError(
+                StateStoreErrorReason.INVALID_DATA, detail="duplicate target folder"
+            )
+        try:
+            with closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                for old_folder, new_folder in folder_updates:
+                    if old_folder == new_folder:
+                        continue
+                    target = connection.execute(
+                        "SELECT 1 FROM copies WHERE profile_id = ? AND destination_folder = ? "
+                        "LIMIT 1",
+                        (profile_id, new_folder),
+                    ).fetchone()
+                    if target is not None:
+                        raise StateStoreError(
+                            StateStoreErrorReason.INVALID_DATA,
+                            detail=f"copy records already exist for target folder: {new_folder}",
+                        )
+                    connection.execute(
+                        "UPDATE copies SET destination_folder = ? WHERE profile_id = ? "
+                        "AND destination_folder = ?",
+                        (new_folder, profile_id, old_folder),
+                    )
+                for folder in removed_folders:
+                    connection.execute(
+                        "DELETE FROM copies WHERE profile_id = ? AND destination_folder = ?",
+                        (profile_id, folder),
+                    )
+                self._replace_slots(connection, profile_id, frozen_slots, timestamp)
+                for rename_id in rename_ids:
+                    changed = connection.execute(
+                        "UPDATE folder_renames SET state = 'done', updated_at = ? "
+                        "WHERE id = ? AND profile_id = ? AND state = 'started'",
+                        (timestamp, rename_id, profile_id),
+                    ).rowcount
+                    if not changed:
+                        raise StateStoreError(
+                            StateStoreErrorReason.INVALID_DATA,
+                            detail=f"rename is missing or not started: {rename_id}",
+                        )
+                connection.commit()
+        except StateStoreError:
+            raise
+        except sqlite3.Error as error:
+            raise StateStoreError(
+                StateStoreErrorReason.IO_ERROR, path=self.path, detail=str(error)
+            ) from error
+
+    def _mark_folder_renames(self, rename_ids: tuple[str, ...], state: FolderRenameState) -> None:
+        timestamp = self._timestamp()
+        if len(set(rename_ids)) != len(rename_ids):
+            raise StateStoreError(StateStoreErrorReason.INVALID_DATA, detail="duplicate rename ID")
+        try:
+            with closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                for rename_id in rename_ids:
+                    changed = connection.execute(
+                        "UPDATE folder_renames SET state = ?, updated_at = ? "
+                        "WHERE id = ? AND state = 'started'",
+                        (state.value, timestamp, rename_id),
+                    ).rowcount
+                    if not changed:
+                        raise StateStoreError(
+                            StateStoreErrorReason.INVALID_DATA,
+                            detail=f"rename is missing or not started: {rename_id}",
+                        )
+                connection.commit()
+        except StateStoreError:
+            raise
+        except sqlite3.Error as error:
+            raise StateStoreError(
+                StateStoreErrorReason.IO_ERROR, path=self.path, detail=str(error)
+            ) from error
+
+    def mark_folder_renames_rolled_back(self, rename_ids: tuple[str, ...]) -> None:
+        """Mark rename journal entries as rolled back atomically."""
+        self._mark_folder_renames(rename_ids, FolderRenameState.ROLLED_BACK)
+
+    def mark_folder_rename_recovered(self, rename_id: str) -> None:
+        """Mark one started rename journal entry as recovered."""
+        self._mark_folder_renames((rename_id,), FolderRenameState.RECOVERED)
+
+    def unfinished_folder_renames(self) -> tuple[FolderRenameRecord, ...]:
+        """Return started folder-rename records in deterministic order."""
+        try:
+            with closing(self._connect()) as connection:
+                rows = connection.execute(
+                    "SELECT * FROM folder_renames WHERE state = 'started' ORDER BY started_at, id"
+                ).fetchall()
+            return tuple(
+                FolderRenameRecord(
+                    id=row["id"],
+                    profile_id=row["profile_id"],
+                    old_folder=row["old_folder"],
+                    new_folder=row["new_folder"],
+                    intermediate_folder=row["intermediate_folder"],
+                    state=FolderRenameState(row["state"]),
+                    started_at=row["started_at"],
+                    updated_at=row["updated_at"],
+                    target_slots=self._slots_from_json(row["target_slots_json"]),
+                )
+                for row in rows
+            )
+        except StateStoreError:
+            raise
+        except sqlite3.Error as error:
+            raise StateStoreError(
+                StateStoreErrorReason.IO_ERROR, path=self.path, detail=str(error)
+            ) from error
+
+    def remove_destination_folder_records(
+        self, profile_id: str, destination_folder: str, slots: tuple[Slot, ...]
+    ) -> int:
+        """Delete all register entries for a folder while replacing profile slots."""
+        frozen_slots = self._validate_slots(slots)
+        timestamp = self._timestamp()
+        try:
+            with closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                removed = connection.execute(
+                    "DELETE FROM copies WHERE profile_id = ? AND destination_folder = ?",
+                    (profile_id, destination_folder),
+                ).rowcount
+                self._replace_slots(connection, profile_id, frozen_slots, timestamp)
+                connection.commit()
+                return removed
+        except StateStoreError:
+            raise
+        except sqlite3.Error as error:
+            raise StateStoreError(
+                StateStoreErrorReason.IO_ERROR, path=self.path, detail=str(error)
+            ) from error
+
+    def remove_copy_records(
+        self, profile_id: str, destination_folder: str, names: tuple[str, ...]
+    ) -> None:
+        """Remove selected copy records for one destination folder atomically."""
+        try:
+            with closing(self._connect()) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.executemany(
+                    "DELETE FROM copies WHERE profile_id = ? AND destination_folder = ? "
+                    "AND destination_name = ?",
+                    [(profile_id, destination_folder, name) for name in names],
+                )
+                connection.commit()
         except sqlite3.Error as error:
             raise StateStoreError(
                 StateStoreErrorReason.IO_ERROR, path=self.path, detail=str(error)

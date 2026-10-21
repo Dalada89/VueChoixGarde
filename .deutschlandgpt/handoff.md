@@ -1,6 +1,6 @@
 # Handoff – VueChoixGarde
 
-Status: Phase 8 packaging/CI/release documentation is in progress. Latest Linux checks: Ruff format/check and Pyright pass; pytest reports 347 passed and 1 Windows-only skip. The QtNetwork binding is now bundled as a QtMultimedia dependency and the packaged smoke test passes, but the bundle scan still rejects QtQml/QtQuick native dependencies; product-owner approval is needed before relaxing those exclusions. Phase 7 manual/platform validation remains open. No commit was created.
+Status: Phase 8 packaging/CI/release documentation remains in progress. The latest Zielordner-Management implementation (FR-100–FR-104) is complete in the working tree; Linux verification: 382 pytest passed, 1 Windows-only skip, Ruff format/check and Pyright pass. The QtNetwork bundle decision, Phase 7 visual/translation review, and cross-platform manual validation remain open. No commit was created.
 Zweck: Fortsetzung der Arbeit auf einem anderen Rechner bzw. in einer neuen Sitzung.
 
 ## 1. Ziel des Projekts
@@ -270,3 +270,17 @@ Windows/macOS builds and CI release workflows remain unrun locally; real hardwar
 - Regressionstests prüfen Navigation und erhaltenen Button-Fokus sowie keine Hauptfenster-Navigation bei Pfeiltasten in einem Dialog-Textfeld.
 - Verifikation: gezielte UI-Regressionstests 2/2 bestanden; Ruff format check (135 Dateien) und Ruff check bestanden; Pyright ohne Diagnosen; `pytest` 354 bestanden, 1 übersprungen (Windows-spezifischer Extended-Path-Test auf Linux). `git diff --check` bestanden.
 - Manuelle Prüfung mit realer Tastatur und plattformübergreifende Tastaturvalidierung bleiben wie zuvor offen. Kein Commit erstellt.
+
+## 17. Zielordner umbenennen und löschen (FR-100–FR-104)
+
+Implementierung gemäß `.deutschlandgpt/plans/zielordner-umbenennen-loeschen.md` abgeschlossen. `docs/requirements.md` blieb unverändert. Die Profil-Speicherung erfasst Rename-Werte im UI-Thread, führt Zielordner-Renames mit SQLite-Journal und Recovery aus und aktualisiert Slots/Register atomar. Zielordner-Löschen klassifiziert verwaltete gegenüber fremden Einträgen, schützt fremde/geänderte/versteckte Dateien und verwendet einen bestätigten Check-Token gegen Änderungen zwischen Prüfung und Ausführung. Dazu kamen Delete-/Rename-Events, DE/EN/FR-Texte, UI-Bestätigungen, Dokumentation und Regressionstests.
+
+### Verifikation
+
+- `uv sync --locked`: bestanden.
+- `uv run ruff format --check`: bestanden (141 Dateien formatiert); `uv run ruff check`: bestanden.
+- `uv run pyright`: bestanden (0 Fehler/Warnungen/Informationen).
+- `QT_QPA_PLATFORM=offscreen uv run pytest -q`: bestanden (382 passed, 1 skipped). Der Skip ist der Windows-spezifische Extended-Path-Test unter Linux.
+- `git diff --check`: bestanden.
+- AK 21: `test_saved_slot_rename_moves_folder_and_copy_register`; AK 22: `test_interrupted_physical_rename_is_recovered_before_session_use` und `test_journaled_rename_without_physical_move_is_rolled_back_on_open`; AK 23: `test_folder_delete_confirmation_defaults_to_cancel_and_shows_foreign_names` (inkl. Escape) sowie Submission-Test in `test_settings_dialog.py`; AK 24: `test_foreign_entries_are_preserved_when_destination_is_detached`.
+- Manuelle Plattformprüfungen bleiben offen: Windows-Rename bei im Explorer geöffnetem Ordner sowie macOS/APFS-Rename nur mit geänderter Groß-/Kleinschreibung. Sie sind in `docs/manual-test-plan.md` notiert. Kein Commit erstellt.

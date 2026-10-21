@@ -26,6 +26,12 @@ Settings → Slots lets you add or remove slots (one to 12), assign a physical k
 
 A profile belongs to a source folder and persists its slots and copy register. The global slot template supplies slots for a folder with no existing profile. Settings → Profiles allows managing templates and profiles, including orphaned profiles. Reassigning a profile does not move image files.
 
+### Rename or delete a destination folder
+
+In Settings → Slots → Select "Current folder profile" from the dropdown, changing the saved name of an existing destination in the current profile and saving renames that direct child folder on disk, updates its copy register and keeps the profile consistent. The app checks every target before changing anything and never replaces an existing entry. A name swap must be done in separate saves. Clearing a name, removing a slot, or changing the global template does not rename a folder.
+
+Use **Delete destination…** on an unchanged saved profile slot to inspect its folder. If every entry is a verified managed copy, confirmation permanently deletes those copies and the now-empty folder; nothing goes to the recycle bin. Cancel is the default and Escape cancels. If the folder contains unknown, changed, hidden or non-file entries, the app leaves all files and the folder untouched and offers to remove only the slot assignment and register records. You can then review and delete the remaining files manually. If the folder changed after inspection, the app asks you to review the new state before acting. A missing folder only has its saved assignment and register information removed.
+
 ## Keyboard shortcuts and layout labels
 
 - Left / Right: previous / next image
