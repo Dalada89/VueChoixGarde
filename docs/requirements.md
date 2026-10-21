@@ -1,7 +1,7 @@
 # Product Requirements — VueChoixGarde
 
 **Document type:** Software Requirements Specification (SRS)  
-**Version:** 0.6 (draft for Version 1 of the product)  
+**Version:** 0.7 (draft for Version 1 of the product)  
 **Product:** VueChoixGarde — a local desktop application for quickly reviewing images and sorting them into destination folders  
 **Target platforms:** Linux, Windows and macOS  
 
@@ -30,6 +30,7 @@ Each destination is represented by a slot with its own key. Pressing a slot key 
 | Current image | The image currently displayed in the main view. |
 | Destination folder | A direct subfolder of the source folder into which a slot copies images. |
 | Destination profile | The set of slots (key, destination folder name, color) that belongs to one source folder. |
+| Foreign entry | Any entry in a destination folder that is neither a verified managed copy of the active profile nor a temporary file the copy register identifies as the application's own (FR-046). This includes other files, modified managed copies, subfolders, symbolic links and hidden files such as `.DS_Store` or `Thumbs.db`. |
 | Global slot template | The slot configuration used to create the destination profile of a source folder that has no profile yet. |
 | Image list | The sorted list of supported images found in the source folder when it was opened or last refreshed. |
 | Managed copy | A file that the application itself created in a destination folder and recorded in the copy register. |
@@ -55,6 +56,7 @@ Each destination is represented by a slot with its own key. Pressing a slot key 
 - Up to 12 slots with configurable key, destination folder name and color; four default slots.
 - Toggle a byte-identical copy of the current image (and its sidecar files) into a destination folder.
 - Show which destinations contain the current image.
+- Rename and delete destination folders of the active profile under the rules in Section 5.10.
 - Keep settings, destination profiles and selection status across restarts.
 - Selectable user interface language: German, English, French.
 - Help view with an overview of all keyboard shortcuts.
@@ -119,7 +121,7 @@ Each destination is represented by a slot with its own key. Pressing a slot key 
 ### 5.3 Slots, Destination Profiles and Destination Folders
 
 - **FR-031 — Default slots (MUST):** The global slot template MUST initially contain four slots whose keys are defined by the physical key positions of `W`, `A`, `S`, `D` on a US-QWERTY keyboard (FR-081). Each default slot has a distinct default color and no destination folder name.
-- **FR-032 — Number of slots (MUST):** Users MUST be able to add and remove slots. A destination profile contains at least 1 and at most 12 slots.
+- **FR-032 — Number of slots (MUST):** Users MUST be able to add and remove slots. A destination profile contains at least 1 and at most 12 slots. Removing a slot MUST NOT rename or delete its destination folder; deleting a destination folder is a separate command (FR-102).
 - **FR-033 — Configure slot (MUST):** For each slot users MUST be able to set the slot key, the destination folder name and the feedback color. Within one profile:
   - slot keys MUST be unique,
   - destination folder names MUST be unique when compared case-insensitively and after Unicode normalization (`Best` and `best` are the same folder).
@@ -128,9 +130,9 @@ Each destination is represented by a slot with its own key. Pressing a slot key 
 - **FR-034 — Destination folder name rules (MUST):** A destination folder name MUST be rejected with an explanation if it is empty, consists only of spaces or dots, contains a path separator, is `.` or `..`, is absolute, contains characters not permitted on any of the target platforms (`< > : " / \ | ? *` and control characters), ends with a space or dot, or is a name reserved on Windows (e.g. `CON`, `NUL`, `COM1`). The same rules apply on all platforms so that profiles behave identically everywhere.
 - **FR-035 — Name prompt on first use (MUST):** If a slot without a destination folder name is activated, the application MUST ask for a name. Cancelling MUST create neither a folder nor a copy. A confirmed name is saved in the destination profile.
 - **FR-036 — Create destination folder (MUST):** When a slot is toggled on and its destination folder does not exist, the application MUST create it as a direct subfolder of the source folder. If a folder whose name differs only in case already exists, that folder MUST be used and no second folder created.
-- **FR-037 — Existing destination folder (MUST):** An existing destination folder MUST be used without emptying, renaming or otherwise changing its existing contents.
+- **FR-037 — Existing destination folder (MUST):** An existing destination folder MUST be used without emptying, renaming or otherwise changing its existing contents. Renaming and deleting happen only through the explicit commands in Section 5.10.
 - **FR-038 — Destination folder is not a folder (MUST):** If a file (not a folder) with the destination folder name exists, or the destination folder resolves to a location outside the source folder (symbolic link, junction, alias), the slot MUST be marked as faulty and no file operation MUST take place.
-- **FR-039 — Empty destination folders remain (MUST):** A destination folder MUST NOT be deleted, even if it no longer contains any files after toggle-off.
+- **FR-039 — No automatic folder deletion (MUST):** A destination folder MUST NOT be deleted as a side effect of toggle off, reconciliation, removing a slot or any other operation, even if it no longer contains any files. It MUST only be deleted by the explicit command in FR-102 to FR-104.
 - **FR-040 — Destination profile per source folder (MUST):** Each source folder has its own destination profile, identified by the source folder's absolute, normalized path. The active profile (source folder name and path) MUST be visible. A profile MUST never be applied to a different source folder automatically.
 - **FR-041 — New source folder (MUST):** When a source folder without a profile is opened, a new profile MUST be created as a copy of the global slot template. Later changes to the template MUST NOT change existing profiles.
 - **FR-042 — Manage template and profiles (MUST):** Users MUST be able to:
@@ -210,6 +212,34 @@ Each destination is represented by a slot with its own key. Pressing a slot key 
 - **FR-091 — Log file (MUST):** The application MUST write a local log file in JSON Lines format (one JSON object per line) in the application data. Each entry MUST contain at least timestamp (ISO 8601), level, event type and message. Logged events include: start/end, folder opened, every file operation with its result, conflicts, reconciliation results and errors.
 - **FR-092 — Log limits (MUST):** The log MUST NOT contain image content or image metadata (e.g. GPS coordinates). Log files MUST be limited in size and rotated (e.g. at most 5 files of 10 MB each). The settings or help view MUST offer a way to open the log folder.
 
+### 5.10 Destination Folder Management
+
+- **FR-100 — Rename destination folder (MUST):** If the user changes the destination folder name of an existing slot of the active profile in the settings dialog and saves, and the slot already had a destination folder name, the application MUST:
+  - validate the new name (FR-033, FR-034),
+  - look up the old destination folder as in FR-036 (case-insensitive) and FR-038,
+  - if the old folder exists: rename it physically to the new name, as a direct subfolder of the source folder, and update every copy register entry of the active profile that refers to the old folder so that it refers to the renamed folder. All entries in the folder, including foreign entries, move with the folder and are not otherwise changed; the selection status of all images is preserved,
+  - if the old folder does not exist: change only the name in the profile. No folder is created (FR-036 applies at the next toggle on), and register entries for the missing folder are removed as in FR-050.
+
+  A slot is identified independently of its key, color and position; changing these in the same save does not by itself count as a rename. Resetting the profile to the template, assigning a profile (FR-042) and removing a slot (FR-032) never rename a folder. While the copy register is unavailable (FR-063), renaming MUST NOT be possible. After success, a brief message MUST name the old and the new folder name.
+- **FR-101 — Rename conflicts and failures (MUST):**
+  - If an entry (file or folder) with the new name already exists in the source folder (compared as in FR-033), the rename MUST be aborted with a visible error (FR-090) naming the old and the new folder. Exception: if the old and new name refer to the same folder (they differ only in case or Unicode normalization), the folder MUST be renamed to the exact new spelling.
+  - If the old folder is faulty (FR-038) or the rename fails (e.g. missing permission, folder in use, unsupported by the file system), the rename MUST be aborted with a visible error.
+  - A rename MUST never overwrite, replace or merge with an existing entry, also not in a race with another program.
+  - After an abort, the folder, its contents, the copy register and the saved profile slots MUST be unchanged, and the settings dialog MUST stay open so the user can correct the name.
+  - If one save contains several renames, all of them MUST be checked before the first is carried out. A new name counts as occupied if an entry with that name exists before the save, even if another rename in the same save would free it (swapping two names requires separate saves). If a later rename fails, renames already carried out in that save MUST be reverted.
+  - If the application terminates between renaming the folder and updating the copy register and profile, the next start MUST detect this and make folder, register and profile consistent again (complete or revert the rename) before any slot action is possible.
+  - Every rename and its result MUST be logged (FR-091).
+- **FR-102 — Delete destination folder: command and check (MUST):** The settings dialog MUST offer, for each slot of the active profile with a saved destination folder name, an explicit command to delete its destination folder. The command applies to the saved name and MUST NOT be available while the slot's name has unsaved changes, while a file operation is running (FR-051) or while the copy register is unavailable (FR-063). Before asking for confirmation, the application MUST check the folder against the copy register (as in FR-050) and determine exactly one of these cases:
+  - **deletable:** the folder is empty or contains only verified managed copies of the active profile and the application's own temporary files,
+  - **foreign entries:** the folder contains at least one foreign entry,
+  - **missing:** the folder does not exist,
+  - **faulty:** the destination is faulty (FR-038); it is handled like *foreign entries* and no file operation takes place.
+- **FR-103 — Delete destination folder: confirmation (MUST):** Before anything changes, a dialog MUST name the folder and state what will happen: for *deletable*, how many managed copies will be deleted permanently (no trash) and that the folder will be removed; for *foreign entries* and *faulty*, that the folder and all its contents will remain, that the application will stop tracking it, and which foreign entries were found (at least their number and the first names); for *missing*, that only the stored information is removed. The default choice MUST be “Cancel”; `Esc` and closing the dialog MUST act as “Cancel”. Cancelling MUST change nothing.
+- **FR-104 — Delete destination folder: execution (MUST):** After confirmation:
+  - *deletable:* every managed copy MUST be re-verified immediately before it is deleted (NFR-003, as in FR-048), the application's own temporary files are removed, and then the folder MUST be removed with an operation that only removes an empty folder (never recursively). If an entry appeared in the meantime or a deletion fails, the folder MUST remain, copies already deleted stay deleted and their register entries are removed, the remaining copies stay registered, the slot keeps its name, and an error MUST be shown (FR-058).
+  - *foreign entries* and *faulty:* no file or folder MUST be created, changed, moved or deleted. A warning MUST state that the folder contains unknown files and was therefore not deleted, that it must be deleted manually if desired, and that files in it are no longer tracked by the application (a later toggle on into a folder with this name treats them as conflict files, FR-047).
+  - In every successful case, including *foreign entries*, *faulty* and *missing*, all copy register entries of the active profile for this folder MUST be removed and the slot's destination folder name MUST be cleared, so that the slot shows the state *no destination name* (FR-073); slot key and color remain. The change to the profile MUST be saved, and the result MUST be logged (FR-091).
+
 ## 6. Non-functional Requirements
 
 ### 6.1 Data Safety and Privacy
@@ -218,13 +248,13 @@ Each destination is represented by a slot with its own key. Pressing a slot key 
 
   | Location | Permitted operation |
   |---|---|
-  | Source folder | Create a destination folder (FR-036). Nothing else. |
-  | Destination folder | Create temporary files and managed copies (FR-046); delete own temporary files and managed copies (FR-046, FR-048, FR-049). |
+  | Source folder | Create a destination folder (FR-036); rename a destination folder of the active profile (FR-100, FR-101); remove an empty destination folder of the active profile (FR-104). Nothing else. |
+  | Destination folder | Create temporary files and managed copies (FR-046); delete own temporary files and managed copies (FR-046, FR-048, FR-049, FR-104). |
   | Application data | Read and write application data and log files. |
 
-  In particular, files in the source folder MUST never be modified, moved, renamed or deleted, and no file outside the source folder and the application data MUST be changed.
+  In particular, files in the source folder MUST never be modified, moved, renamed or deleted; subfolders of the source folder that are not destination folders of the active profile MUST never be renamed or deleted; a destination folder MUST only be removed when it is empty; and no file outside the source folder and the application data MUST be changed.
 - **NFR-002 — Stay inside the source folder (MUST):** Every path the application writes to MUST, after resolving symbolic links, junctions and aliases, lie inside the source folder (or the application data). Paths that resolve to a location outside MUST be rejected.
-- **NFR-003 — No deletion without verification (MUST):** A file MUST be deleted only if it is a verified managed copy (FR-048) or after explicit confirmation as a modified managed copy (FR-049). Uncertainty about a file's status MUST never be treated as permission to delete or overwrite.
+- **NFR-003 — No deletion without verification (MUST):** A file MUST be deleted only if it is a verified managed copy (FR-048, FR-104) or after explicit confirmation as a modified managed copy (FR-049). A folder MUST be deleted only if it is an empty destination folder of the active profile after confirmation (FR-103, FR-104). Uncertainty about a file's status MUST never be treated as permission to delete or overwrite.
 - **NFR-004 — UI effects are not persisted (MUST):** Scaling, rotation, color feedback, stars and other indicators exist only in the interface and MUST NOT be written into any image file.
 - **NFR-005 — Local only (MUST):** The application MUST NOT send images, metadata, settings or logs over the network.
 
@@ -283,11 +313,15 @@ V1 is accepted when all of the following pass on Linux, Windows and macOS:
 18. Missing application data is created on first start; damaged application data is kept and does not lead to deletions (FR-062, FR-063).
 19. No path outside the source folder and the application data is written, including via symbolic links (NFR-001, NFR-002).
 20. The log is valid JSON Lines and contains no image metadata (FR-091, FR-092).
+21. Renaming a slot's destination folder renames the folder physically and keeps all files and the selection status of all images; if the new name is already taken (also when it differs only in case), nothing changes and an error is shown; a case-only change of the same folder is applied (FR-100, FR-101).
+22. A rename interrupted between folder and register update is made consistent at the next start (FR-101).
+23. A destination folder that is empty or contains only verified managed copies is deleted only after confirmation with “Cancel” preselected; cancelling changes nothing (FR-102–FR-104).
+24. A destination folder with foreign entries (including hidden files, modified managed copies and subfolders) is neither changed nor deleted; its register entries are removed, the slot loses its destination name and a warning says the folder must be deleted manually (FR-102–FR-104).
 
 ## 8. Test Requirements
 
-- **Unit tests:** format filter, sidecar matching (FR-043, including shared stems and case variants), natural case-insensitive sorting in both directions, navigation and boundaries, slot and name validation, key conflict detection, profile/template handling, decision logic for toggle on / toggle off / conflict / modified copy.
-- **Integration tests with temporary folders:** byte-identical copying including EXIF camera, capture date and GPS fields; safe copy procedure with simulated failures; toggle off; shared sidecar copies; conflict protection with case variants; symbolic links pointing outside; externally deleted or modified copies; reconciliation without file changes; damaged and missing application data; source folder unchanged after every test (checked by content hashes).
+- **Unit tests:** format filter, sidecar matching (FR-043, including shared stems and case variants), natural case-insensitive sorting in both directions, navigation and boundaries, slot and name validation, key conflict detection, profile/template handling, decision logic for toggle on / toggle off / conflict / modified copy, rename planning (occupied names, case-only renames, several renames in one save), classification of a destination folder before deletion (deletable / foreign entries / missing / faulty).
+- **Integration tests with temporary folders:** byte-identical copying including EXIF camera, capture date and GPS fields; safe copy procedure with simulated failures; toggle off; shared sidecar copies; conflict protection with case variants; symbolic links pointing outside; externally deleted or modified copies; reconciliation without file changes; damaged and missing application data; renaming destination folders including occupied names, simulated failures, rollback of several renames and an interrupted rename; deleting destination folders in every case of FR-102, including an entry appearing between check and deletion; source folder unchanged after every test (checked by content hashes).
 - **Manual tests per platform:** keyboard layouts (at least QWERTY, QWERTZ, AZERTY), key repeat, focus in text fields, all formats including HEIC where supported, EXIF orientation, sound, languages, help view, appearance.
 - Automated tests MUST use generated or bundled test images, never the user's personal images.
 
@@ -305,3 +339,4 @@ There are currently no open decisions.
 | 0.4 | 2026-10-16 | Replaced copy-only behavior with a per-slot toggle: first activation copies the image and matching sidecars; second activation removes only verified managed copies. |
 | 0.5 | 2026-10-16 | HEIC/HEIF always listed; on platforms without decoding support an error is shown instead of the image (FR-004); slot actions stay available for undisplayable images (FR-023). Review results incorporated: glossary with managed/verified/modified copies, copy register and sidecar rules; navigation corrected (→ next, ← previous); permanent deletion on toggle off, confirmation for modified copies; safe copy procedure; one operation at a time; case-insensitive destination names; symbolic links pointing outside rejected; EXIF orientation; maximum of 12 slots; global slot template; physical key positions, unmodified slot keys; HEIC/HEIF platform-dependent and not a release criterion; RAW files and Live Photo videos are not copied as companion files; UI languages DE/EN/FR; help and shortcut overview; JSONL logging; dark design; GitHub distribution; decided items removed; restructured to remove redundancies and technology-specific statements. |
 | 0.6 | 2026-10-16 | Slot key labels (FR-081): initially the US-QWERTY character, then the character learned from the first unmodified key press, persisted as a global setting (FR-060); known limitation documented. Acceptance criterion 14 adjusted accordingly. |
+| 0.7 | 2026-10-21 | Destination folder management (Section 5.10): renaming a slot's destination name renames the folder physically and updates the copy register; occupied names abort with an error (FR-100, FR-101). Explicit deletion of a destination folder after confirmation with “Cancel” preselected, only if it is empty or contains only verified managed copies; with foreign entries the folder is kept, the stored information is removed and a warning is shown (FR-102–FR-104). Glossary term *foreign entry*; FR-032, FR-037, FR-039, NFR-001, NFR-003, acceptance criteria 21–24 and test requirements adjusted. |
