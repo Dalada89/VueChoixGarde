@@ -11,7 +11,7 @@ from vuechoixgarde.app.recovery import recover_operations
 from vuechoixgarde.app.session import FolderSession
 from vuechoixgarde.app.toggle import execute_toggle, plan_toggle
 from vuechoixgarde.core.navigation import NavigationDirection
-from vuechoixgarde.core.slots import Slot
+from vuechoixgarde.core.slots import Slot, SlotMode
 from vuechoixgarde.core.temp_names import temp_file_name
 from vuechoixgarde.fsops.filesystem import LocalFileSystem
 from vuechoixgarde.fsops.lock import LocalFolderLockFactory
@@ -132,6 +132,141 @@ def test_recovery_never_deletes_same_content_conflict_when_temp_also_exists(
     assert not temp_files[0].exists()
     assert conflict.read_bytes() == source.read_bytes()
     assert state.unfinished_operations()[0].id == operation_id
+
+
+def test_crash_during_move_recovers_moved_file_to_source_without_registering_copy(
+    tmp_path: Path, fixed_clock: Any, source_guard: Any
+) -> None:
+    root = source_guard.root
+    source = root / "IMG_1.jpg"
+    sidecar = root / "IMG_1.xmp"
+    source_bytes = b"move-recovery-image"
+    sidecar_bytes = b"move-recovery-sidecar"
+    source.write_bytes(source_bytes)
+    sidecar.write_bytes(sidecar_bytes)
+    app_data = tmp_path / "app-data"
+    state = SQLiteStateStore(app_data, fixed_clock)
+    state.load()
+    filesystem = FaultInjectingFileSystem()
+    profile = state.create_profile_from_template(
+        filesystem.folder_identity(root),
+        str(root),
+        (Slot("KeyR", "trash", "#FF7B7B", SlotMode.MOVE),),
+    )
+    source_guard.seal(allowed_destinations={"trash"})
+    plan = plan_toggle(profile, root, source.name, 0, filesystem, filesystem, state)
+    filesystem.crash_after_move_at = 1
+
+    with pytest.raises(SimulatedCrash):
+        execute_toggle(plan, profile, filesystem, filesystem, state, fixed_clock, OperationGate())
+
+    destination = root / "trash" / source.name
+    assert destination.exists()
+    operation_id = state.unfinished_operations()[0].id
+    restarted_state = SQLiteStateStore(app_data, fixed_clock)
+    assert restarted_state.load().status is LoadStatus.LOADED
+    filesystem.crash_after_move_at = None
+
+    report = recover_operations(restarted_state, filesystem, profile.id, root)
+
+    assert report.recovered == (operation_id,)
+    assert source.read_bytes() == source_bytes
+    assert sidecar.read_bytes() == sidecar_bytes
+    assert not destination.exists()
+    assert restarted_state.copy_records(profile.id, str(root / "trash")) == ()
+    assert restarted_state.unfinished_operations() == ()
+
+
+@pytest.mark.parametrize("recovery_state", ("changed", "missing", "conflicting"))
+def test_move_recovery_keeps_changed_missing_or_conflicting_files_open(
+    tmp_path: Path, fixed_clock: Any, recovery_state: str
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    source = root / "IMG_1.jpg"
+    original = b"move-recovery-original"
+    source.write_bytes(original)
+    app_data = tmp_path / "app-data"
+    state = SQLiteStateStore(app_data, fixed_clock)
+    state.load()
+    filesystem = FaultInjectingFileSystem()
+    profile = state.create_profile_from_template(
+        filesystem.folder_identity(root),
+        str(root),
+        (Slot("KeyR", "trash", "#FF7B7B", SlotMode.MOVE),),
+    )
+    plan = plan_toggle(profile, root, source.name, 0, filesystem, filesystem, state)
+    filesystem.crash_after_move_at = 1
+
+    with pytest.raises(SimulatedCrash):
+        execute_toggle(plan, profile, filesystem, filesystem, state, fixed_clock, OperationGate())
+
+    destination = root / "trash" / source.name
+    operation_id = state.unfinished_operations()[0].id
+    filesystem.crash_after_move_at = None
+    if recovery_state == "changed":
+        destination.write_bytes(b"changed-after-crash")
+    elif recovery_state == "missing":
+        destination.unlink()
+    else:
+        source.write_bytes(b"conflicting-original")
+
+    report = recover_operations(state, filesystem, profile.id, root)
+
+    assert report.recovered == ()
+    assert report.pending == (operation_id,)
+    assert state.unfinished_operations()[0].id == operation_id
+    if recovery_state == "changed":
+        assert destination.read_bytes() == b"changed-after-crash"
+        assert not source.exists()
+    elif recovery_state == "missing":
+        assert not destination.exists()
+        assert not source.exists()
+    else:
+        assert source.read_bytes() == b"conflicting-original"
+        assert destination.read_bytes() == original
+
+
+def test_move_recovery_restores_image_and_preserves_shared_sidecar(
+    tmp_path: Path, fixed_clock: Any
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    source = root / "IMG_1.jpg"
+    other_image = root / "IMG_1.png"
+    sidecar = root / "IMG_1.xmp"
+    source.write_bytes(b"move-recovery-image")
+    other_image.write_bytes(b"other-image")
+    sidecar.write_bytes(b"shared-sidecar")
+    app_data = tmp_path / "app-data"
+    state = SQLiteStateStore(app_data, fixed_clock)
+    state.load()
+    filesystem = FaultInjectingFileSystem()
+    profile = state.create_profile_from_template(
+        filesystem.folder_identity(root),
+        str(root),
+        (Slot("KeyR", "trash", "#FF7B7B", SlotMode.MOVE),),
+    )
+    plan = plan_toggle(profile, root, source.name, 0, filesystem, filesystem, state)
+    filesystem.crash_after_move_at = 1
+
+    with pytest.raises(SimulatedCrash):
+        execute_toggle(plan, profile, filesystem, filesystem, state, fixed_clock, OperationGate())
+
+    destination = root / "trash"
+    operation_id = state.unfinished_operations()[0].id
+    filesystem.crash_after_move_at = None
+
+    report = recover_operations(state, filesystem, profile.id, root)
+
+    assert report.recovered == (operation_id,)
+    assert source.read_bytes() == b"move-recovery-image"
+    assert other_image.read_bytes() == b"other-image"
+    assert sidecar.read_bytes() == b"shared-sidecar"
+    assert not (destination / source.name).exists()
+    assert not (destination / sidecar.name).exists()
+    assert state.copy_records(profile.id, str(destination)) == ()
+    assert state.unfinished_operations() == ()
 
 
 def test_session_open_locks_navigates_refreshes_and_closes(

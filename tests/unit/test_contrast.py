@@ -27,3 +27,10 @@ def test_stylesheet_text_color_pairs_meet_wcag_aa() -> None:
 
 def test_default_slot_palette_has_readable_contrast_on_slot_panel() -> None:
     assert all(contrast_ratio(slot.color, "#383838") >= 4.5 for slot in DEFAULT_SLOTS)
+
+
+def test_default_w_and_r_colors_have_panel_contrast() -> None:
+    w_slot, move_slot = DEFAULT_SLOTS[0], DEFAULT_SLOTS[4]
+    assert w_slot.color == "#CE93D8"
+    assert move_slot.color == "#FF7B7B"
+    assert all(contrast_ratio(slot.color, "#383838") >= 4.5 for slot in (w_slot, move_slot))

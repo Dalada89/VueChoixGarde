@@ -27,6 +27,7 @@ from vuechoixgarde.ports.models import (
     FolderRenameState,
     LoadStatus,
     OperationFileRecord,
+    OperationKind,
     OperationRecord,
     OperationState,
     ProfileRecord,
@@ -368,6 +369,9 @@ class InMemoryStateStore(StateStore):
         profile_id: str,
         destination_name: str,
         files: Sequence[OperationFileRecord],
+        *,
+        kind: OperationKind = OperationKind.COPY,
+        source_folder: str | None = None,
     ) -> OperationRecord:
         now = self._timestamp()
         operation = OperationRecord(
@@ -378,6 +382,8 @@ class InMemoryStateStore(StateStore):
             now,
             now,
             tuple(files),
+            kind,
+            source_folder,
         )
         self.operations[operation_id] = operation
         return operation
@@ -445,6 +451,9 @@ class FaultInjectingFileSystem(LocalFileSystem):
         self.fail_rename_at: int | None = None
         self.rename_attempts = 0
         self.crash_after_rename = False
+        self.fail_move_at: int | None = None
+        self.crash_after_move_at: int | None = None
+        self.move_attempts = 0
         self.finalized: list[str] = []
 
     def rename_destination_folder(
@@ -463,6 +472,14 @@ class FaultInjectingFileSystem(LocalFileSystem):
         if self.crash_after_rename:
             raise SimulatedCrash
         return result
+
+    def _move_file(self, source_path: Path, destination_path: Path) -> None:
+        self.move_attempts += 1
+        if self.move_attempts == self.fail_move_at:
+            raise FileSystemError(FileSystemErrorReason.IO_ERROR, path=source_path)
+        super()._move_file(source_path, destination_path)
+        if self.move_attempts == self.crash_after_move_at:
+            raise SimulatedCrash
 
     def copy_to_temp(
         self, source_root: Path, destination_folder: Path, source_name: str, temp_name: str

@@ -69,6 +69,47 @@ def test_non_us_keyboard_help_is_translated_in_all_languages(qtbot: QtBot) -> No
     set_language("en")
 
 
+def test_move_help_explains_source_changes_and_undo_scope_in_all_languages(
+    qtbot: QtBot,
+) -> None:
+    expected = {
+        "en": (
+            "only slots in Move mode change source files",
+            "current folder session",
+            "changing folders clears",
+            "ordinary folder",
+            "operating-system trash",
+        ),
+        "de": (
+            "Slots im Modus „Verschieben“ verändern Quelldateien",
+            "aktuellen Ordnersitzung",
+            "Ordnerwechsel",
+            "normaler Ordner",
+            "Papierkorb des Betriebssystems",
+        ),
+        "fr": (
+            "seuls les emplacements en mode Déplacer modifient les fichiers source",
+            "session du dossier actuel",
+            "changer de dossier efface",
+            "dossier ordinaire",
+            "corbeille du système",
+        ),
+    }
+    for language, phrases in expected.items():
+        set_language(language)
+        dialog = HelpDialog(None)
+        qtbot.addWidget(dialog)
+        behavior = next(
+            label.text()
+            for label in dialog.findChildren(QLabel)
+            if label.text() == text("help_behavior")
+        )
+        assert all(phrase in behavior for phrase in phrases)
+        assert "trash" in behavior
+        dialog.close()
+    set_language("en")
+
+
 def test_f1_opens_help_and_shortcut_guard_disables_under_modal(
     qtbot: QtBot, tmp_path: Path
 ) -> None:
@@ -179,4 +220,6 @@ def test_sound_only_plays_after_successful_added_toggle(
     )
 
     assert sound.calls == expected_calls
+    expected_prefix = "Added " if action == "toggle_on" else "Removed "
+    assert window.statusBar().currentMessage().startswith(expected_prefix)
     window.close()

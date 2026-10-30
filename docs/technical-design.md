@@ -15,7 +15,7 @@ Requirement IDs (`FR-…`, `NFR-…`) refer to the SRS. Where this design deviat
 Guiding constraints:
 
 - Everything runs locally. No network access, no accounts, no update mechanism (NFR-005, SRS 3.2).
-- Source files are never changed (NFR-001); uncertainty never leads to deletion or overwriting (NFR-003).
+- COPY slots never change source files; MOVE is the deliberately limited exception described in Section 5.4 (NFR-001 and the approved MOVE behavior). Uncertainty never leads to deletion or overwriting (NFR-003).
 - The same behavior on Linux, Windows and macOS (NFR-040).
 
 ## 2. Evaluated variants
@@ -67,10 +67,10 @@ The application is split into layers so that the application logic can be tested
 
 | Package | Responsibility | Depends on Qt? |
 |---|---|---|
-| `core` | Domain types and pure rules: format list (FR-004), sidecar matching (FR-043), natural sort (FR-008), navigation and boundaries (FR-024/025), slot and folder-name validation (FR-033/034), key positions and allowed keys (FR-082), toggle decision (FR-044–FR-050), name comparison keys (NFR-041) | No |
+| `core` | Domain types and pure rules: format list (FR-004), XMP/AAE/RAW sidecar matching (FR-043), natural sort (FR-008), navigation and boundaries (FR-024/025), slot modes and folder-name validation (FR-033/034), key positions and allowed keys (FR-082), toggle decision (FR-044–FR-050), name comparison keys (NFR-041) | No |
 | `ports` | `typing.Protocol` interfaces the application layer uses: file system, register, settings, image decoder, clock, log | No |
-| `app` | Use cases and session state: open folder, refresh, navigate, toggle slot, reconcile, manage profiles; enforces “one operation at a time” (FR-051) | No |
-| `fsops` | Directory scanning, hidden/symlink/junction detection, path containment checks, safe copy, non-overwriting finalization, deletion of verified copies | No |
+| `app` | Use cases and session state: open folder, refresh, navigate, COPY/MOVE slot actions, session-only MOVE undo, reconcile and profile management; enforces “one operation at a time” (FR-051) | No |
+| `fsops` | Directory scanning, hidden/symlink/junction detection, path containment checks, safe copy and move groups, non-overwriting finalization, rollback and deletion of verified copies | No |
 | `store` | Settings file, SQLite database (profiles, copy register, operation journal), schema migrations, handling of damaged data | No |
 | `imaging` | Decoding, EXIF orientation, first frame, downscaling, preload cache | No (returns raw RGB(A) buffers) |
 | `applog` | JSON Lines formatter, rotation, event types | No |
@@ -124,8 +124,8 @@ The `src` layout prevents tests from accidentally importing the working director
 3. Compute the **folder identity** (Section 8.4) and acquire the single-instance lock for it (Section 8.5). If the lock is held by another instance, refuse with a message (NFR-043).
 4. Scan the top level (Section 8.3) and build the image list; sort (FR-008/009).
 5. Load the destination profile for the folder identity; if none exists, copy the global slot template (FR-041).
-6. Recover any interrupted destination-folder rename from `folder_renames` before copy recovery or reconciliation (Section 5.5).
-7. Clean up own temporary files from interrupted runs using the copy-operation journal (FR-046, Section 5.4).
+6. Recover any interrupted destination-folder rename from `folder_renames` before operation recovery or reconciliation (Section 5.5).
+7. Recover interrupted COPY/MOVE operations from the operation journal (FR-046, Section 5.4).
 8. Run reconciliation in the background (FR-070); slot states are shown as “checking” until it finishes.
 
 ### 5.2 Toggle decision (FR-044–FR-050, FR-063)
@@ -150,14 +150,14 @@ When a slot key is pressed, the `app` layer captures the current image *at the t
    | `stale` | Register entry exists, file missing → entry is removed, then treated as `absent` |
 
    If the copy register is unavailable (FR-063), every present file is `foreign`.
-6. **Decide** based on the class of the **image** file:
-   - `verified` → toggle off (Section 5.3).
-   - `modified` → toggle off with confirmation (FR-049).
-   - `absent` → toggle on (Section 5.4), unless any sidecar target is `foreign` or `modified` → conflict, nothing is copied (FR-044, FR-047). Sidecar targets that are `verified` (shared stem) are not copied again.
-   - `foreign` → conflict (FR-047).
+6. **Decide** based on slot mode and the class of the **image** file:
+   - **COPY:** `verified` → toggle off (Section 5.3); `modified` → toggle off with confirmation (FR-049); `absent` → toggle on (Section 5.4), unless any sidecar target is `foreign` or `modified` → conflict, nothing is copied (FR-044, FR-047). Sidecar targets that are `verified` (shared stem) are not copied again; `foreign` → conflict (FR-047).
+   - **MOVE:** one-shot action; it never toggles an existing file off. If any image or sidecar target name is occupied, report a conflict and leave the source and destination unchanged. Otherwise move the complete file group as described below.
 7. Report the result (FR-056/057/058, FR-090) and update the slot states (FR-073).
 
-### 5.3 Toggle off (FR-048, FR-049, NFR-003)
+### 5.3 Toggle off in COPY mode (FR-048, FR-049, NFR-003)
+
+MOVE is not a toggle-off operation; restoring a moved image is handled only by the session undo below.
 
 1. Collect the `verified`/`modified` targets of the image and its sidecars. A sidecar copy that still belongs to another image which is selected in the same destination is kept (FR-048).
 2. If any target is `modified`, show a confirmation dialog naming the affected files; the default button is “Cancel” (FR-049).
@@ -165,7 +165,7 @@ When a slot key is pressed, the `app` layer captures the current image *at the t
 4. Update the register in one transaction. If a deletion fails, the remaining files stay, the register reflects what actually exists, and the error is reported (FR-058).
 5. The destination folder is never deleted (FR-039). No sound (FR-057).
 
-### 5.4 Toggle on with the safe copy procedure (FR-036, FR-044–FR-047, FR-055)
+### 5.4 COPY toggle-on and MOVE procedures (FR-036, FR-044–FR-047, FR-055, FR-056)
 
 1. **Create the destination folder** if needed with `os.mkdir` (never `makedirs`), then re-check that it resolves inside the source folder (NFR-002).
 2. **Write a journal entry** in the SQLite database (state `started`) listing, per file, the temporary name, the final name and the expected size and hash. It is committed before any file is created, so temporary files are always identifiable as the application's own (FR-046).
@@ -179,6 +179,18 @@ When a slot key is pressed, the `app` layer captures the current image *at the t
 5. **Failure in any step:** delete the temporary file, delete all files of this operation that were already finalized (they are known to be byte-identical own copies), mark the journal entry `rolled_back`, report the error (FR-046, FR-058).
 6. **Crash recovery** on the next start or folder open: for every journal entry not in a final state, delete its temporary files if present and delete finalized files only if their size and hash match the journal; then close the entry. Files not listed in the journal are never touched.
 7. On success: feedback with slot color, key and name, plus sound if enabled (FR-056, FR-057).
+
+#### MOVE slots
+
+MOVE is a one-shot, deliberate exception to the non-mutating COPY workflow. The image and its sidecars are handled as a group with their original names. Sidecars shared with another image in the source list are copied so the remaining image keeps them; exclusive sidecars and the current image are moved. The `trash` destination is an ordinary direct subfolder, never the operating-system recycle bin.
+
+Before changing a source file, the operation rejects every occupied target name. Files are fully written and verified in the destination before the source is removed; where the file system permits it, a no-replace atomic rename may be used. The SQLite journal is committed first and records the operation kind, source folder and per-file move-versus-copy role. If a later file fails, the operation attempts to roll back completed moves and temporary/shared-sidecar outputs; if rollback is incomplete, the remaining journaled state is left for conservative recovery rather than being deleted blindly. Moved files do not become managed copy-register entries. On success, the image leaves the live session list; localized MOVE feedback and the normal optional success sound are shown.
+
+On crash recovery, journaled MOVE files are returned only when their expected paths and ownership can be verified. Missing, changed or conflicting states remain pending and are not guessed or overwritten. Files outside the journal are never touched.
+
+#### Session undo (`Ctrl+Z`)
+
+The application keeps successful moves in an in-memory LIFO stack for the current source-folder session. `Ctrl+Z` restores the newest group, puts the image back at its sorted position and makes it current. It has no redo and is not persisted across restarts; the stack is cleared on folder change and application close. Undo stops without changing files if the original name is occupied or a moved file is missing from its remembered destination; the entry remains available to retry. If a moved file was changed after the move, undo restores its current contents. Shared-sidecar copies are handled separately from the files moved back. Undo shows localized success/error feedback and plays no sound.
 
 ### 5.5 Destination-folder rename and deletion (FR-100–FR-104)
 
@@ -230,21 +242,25 @@ Small, human-readable, written atomically (temporary file in the same directory,
 | `sound_enabled` | FR-057 |
 | `sort_direction` | `asc` / `desc` (FR-009) |
 | `reopen_last_folder`, `last_folder` | FR-010 |
-| `global_slot_template` | List of slots `{key_position, destination_name, color}` (FR-031, FR-042) |
+| `global_slot_template` | List of slots `{key_position, destination_name, color, mode}` (FR-031, FR-042) |
 | `learned_key_labels` | Map key position → last observed character (Section 8.1) |
+
+Settings schema version 2 persists each slot mode. Version 1 settings load legacy slots as COPY and append the default `KeyR` → `trash` MOVE slot (`#FF7B7B`) only when `KeyR` and the comparison-normalized name `trash` are free and fewer than 12 slots exist. The migrated settings are saved as version 2, so removing the slot later does not add it again.
 
 ### 6.3 `state.sqlite3`
 
-SQLite (standard library, WAL mode, `PRAGMA user_version` as schema version 2, with a v1→v2 migration). Chosen over plain JSON because the copy register can grow to tens of thousands of entries and because journals and register updates must be transactional.
+SQLite (standard library, WAL mode, `PRAGMA user_version` as schema version 4). Migrations 0→1 create profiles, slots, the copy register and operation journal; 1→2 add the folder-rename journal; 2→3 add slot modes and conditionally migrate legacy profiles to R/`trash`; 3→4 add MOVE origin and per-file ownership metadata to the operation journal. SQLite is used because the copy register can grow to tens of thousands of entries and journal/register updates must be transactional.
 
 | Table | Content |
 |---|---|
 | `profiles` | id, folder identity (Section 8.4), display path, created/updated timestamps |
-| `slots` | profile id, order, key position, destination name, color |
+| `slots` | profile id, order, key position, destination name, color, mode (`copy` / `move`) |
 | `copies` | copy register: profile id, source folder, source name, destination folder, destination name, size, SHA-256, `mtime_ns` at finalization, created timestamp |
-| `operations` | toggle-on journal header: id, profile id, destination name, state (`started`, `done`, `rolled_back`, `recovered`), timestamps |
-| `operation_files` | ordered child rows for each copy journal: temporary name, final name, expected size and SHA-256 |
+| `operations` | operation journal header: id, profile id, destination name, kind (`copy` / `move`), MOVE source folder when applicable, state (`started`, `done`, `rolled_back`, `recovered`), timestamps |
+| `operation_files` | ordered child rows: temporary name, final name, expected size and SHA-256, and whether recovery must move the source file back |
 | `folder_renames` | folder-rename journal: exact old/new/intermediate folder path keys, target slot JSON, state (`started`, `done`, `rolled_back`, `recovered`) and timestamps |
+
+The 2→3 profile migration appends `KeyR` → `trash` in MOVE mode only when there are fewer than 12 slots, `KeyR` is free and no destination name compares equal to `trash`; the schema version makes this a one-time migration. Legacy slots receive COPY mode. Moved files are not managed copy-register entries.
 
 `copies.destination_folder` and all rename-journal folder paths use the same `destination_folder_key(source_root, exact_name)` representation. Reassigning a profile to a moved folder (FR-042) updates the profile's folder identity and rewrites the source/destination folder paths of its register entries; reconciliation then checks them.
 
@@ -268,7 +284,7 @@ SQLite (standard library, WAL mode, `PRAGMA user_version` as schema version 2, w
 
 **Recognition (by physical position):**
 
-- Slot keys are stored as platform-neutral position names following the W3C UI Events `code` values, e.g. `KeyW`, `KeyA`, `Digit1`, `Minus`, `BracketLeft`, `Semicolon`, `IntlBackslash`. The allowed set is the main character block (FR-082); defaults are `KeyW`, `KeyA`, `KeyS`, `KeyD` (FR-031).
+- Slot keys are stored as platform-neutral position names following the W3C UI Events `code` values, e.g. `KeyW`, `KeyA`, `Digit1`, `Minus`, `BracketLeft`, `Semicolon`, `IntlBackslash`. The allowed set is the main character block (FR-082). The default profile uses `KeyW`, `KeyA`, `KeyS`, `KeyD` in COPY mode and `KeyR` for the `trash` destination in MOVE mode (FR-031).
 - A Qt event filter on the main window maps each `QKeyEvent` to a position with one static table per platform:
 
   | Platform | Source value | Example for `KeyW` |
@@ -286,7 +302,7 @@ SQLite (standard library, WAL mode, `PRAGMA user_version` as schema version 2, w
 
 V1 does not query the operating system's keyboard layout. Instead the label of a position is *learned*:
 
-1. Initially, every position shows its US-QWERTY character (defaults: `W A S D`).
+1. Initially, every position shows its US-QWERTY character (default profile labels: `W A S D R`).
 2. Whenever a key at an allowed position is pressed without modifiers and Qt reports a printable `text()`, that character (upper-cased) is stored in `learned_key_labels` and from then on displayed for that position. On AZERTY, pressing the first default slot key once changes its label from `W` to `Z`.
 3. In the settings dialog, a slot key is assigned by pressing it (“press the new key”); this records the position and its label at the same time.
 4. Dead keys or positions without a printable character keep the last known label.
@@ -305,7 +321,8 @@ Consequence: before a key has been pressed once on a non-US layout, its label ca
 - Hidden: name starting with `.`; on Windows `FILE_ATTRIBUTE_HIDDEN` from `stat().st_file_attributes`; on macOS the `UF_HIDDEN` flag from `stat().st_flags`.
 - Symbolic links and Windows junctions: detected with `is_symlink()` / `Path.is_junction()`. A link is kept only if it points to a regular file and its resolved path (`Path.resolve(strict=True)`) lies inside the resolved source folder; otherwise it is ignored.
 - Windows shortcuts (`.lnk`) are not on the format list and are therefore ignored automatically. macOS Finder aliases that carry an image extension cannot be distinguished cheaply; they fail to decode and are shown as unreadable images (known limitation).
-- The extension check uses the fixed list from FR-004 and never the file content.
+- The extension check uses the fixed image-format list from FR-004 and never the file content.
+- Sidecars are not listed or decoded as images. XMP/AAE companions and RAW files with the same stem are associated case-insensitively; multiple supported images with the same stem share the RAW sidecar. The fixed RAW extension list is `.nef`, `.nrw`, `.cr2`, `.cr3`, `.crw`, `.arw`, `.srf`, `.sr2`, `.dng`, `.orf`, `.rw2`, `.raf`, `.pef`, `.srw`, `.x3f`, `.rwl`, `.3fr`, `.raw` (FR-043).
 - Temporary files with the reserved prefix are always excluded.
 
 ### 8.4 Folder identity (FR-040)
@@ -360,7 +377,7 @@ Folder renames use direct-child validation with `lstat`, containment checks and 
 | Center | Image view (scaled, no upscaling); error or empty state in place of the image; subtle boundary cue at list ends | FR-006, FR-020, FR-023, FR-025 |
 | Info line | Filename (elided, full name as tooltip), star if selected anywhere, “12 of 80”, progress bar, selection count | FR-027, FR-028, FR-029, FR-072 |
 | Slot bar | Up to 12 slot tiles in one or two rows, each with key label, destination name, color stripe and a state symbol plus text (none / ready / selected / modified / conflict / faulty) | FR-073, FR-087, NFR-021 |
-| Feedback | Short notification in the slot bar area with slot color, key and name, “added”/“removed” | FR-056 |
+| Feedback | Short localized notification with slot color, key and name for “added”, “removed” or “moved”; successful Undo has its own message | FR-056 |
 
 - Styling with a Qt style sheet: background `#2B2B2B`, panels `#383838`, light grey text, one accent color, system sans-serif font, slightly rounded corners (FR-088). All text/background pairs are checked for ≥ 4.5:1 contrast (NFR-022); focus is shown with a visible outline (NFR-023).
 - Slot colors come from a predefined palette of 12 distinguishable colors; a custom color can be picked with `QColorDialog`.
@@ -372,7 +389,7 @@ Folder renames use direct-child validation with `lstat`, containment checks and 
 - **Name prompt** (FR-035) with live validation (FR-034).
 - **Confirmation for modified copies** (FR-049): lists the files; default button “Cancel”.
 - **Errors** (FR-090): `QMessageBox` with a plain-language text naming the file/folder and a hint; technical details in the expandable details section.
-- **Help** (FR-086, `F1`): fixed keys, current slot keys with names and colors, short explanation of toggle behavior and that source files are never changed.
+- **Help** (FR-086, `F1`): fixed keys and current slot names; explains that only MOVE slots change source files, that `Ctrl+Z` is limited to the current session and cleared on folder change, and that `trash` is a normal folder the user manages manually.
 
 ### 9.3 Translations (FR-085)
 
@@ -380,7 +397,7 @@ UI strings live in simple JSON catalogs (`i18n/de.json`, `en.json`, `fr.json`) w
 
 ### 9.4 Sound (FR-057)
 
-`QSoundEffect` with a short, quiet bundled WAV file, played only after a successful toggle on and only if enabled. If audio output is unavailable, the failure is logged and otherwise ignored.
+`QSoundEffect` with a short, quiet bundled WAV file, played after a successful COPY or MOVE action only when enabled. Toggle-off, Undo, conflicts and errors do not play sound. If audio output is unavailable, the failure is logged and otherwise ignored.
 
 ## 10. Logging (FR-091, FR-092)
 
@@ -413,9 +430,9 @@ UI strings live in simple JSON catalogs (`i18n/de.json`, `en.json`, `fr.json`) w
 
 | Level | Tooling | Scope |
 |---|---|---|
-| Unit | pytest | format filter, sidecar matching (shared stems, case variants), natural sort both directions, navigation and boundaries, name and slot validation, key conflicts, allowed keys and modifiers, profile/template handling, toggle decision table, comparison keys, i18n catalog consistency, log formatter |
-| Integration | pytest with `tmp_path` | byte-identical copy incl. EXIF camera/date/GPS, safe copy with injected failures in every step (fault-injecting file system adapter), crash recovery from journal, toggle off, shared sidecars, conflicts with case variants, symlinks/junctions pointing outside, externally deleted/modified copies, reconciliation without changes, damaged/missing application data, lock between two instances, long paths on Windows; every test asserts at the end that the source folder is unchanged (content hashes) |
-| UI | pytest-qt (offscreen platform) | keyboard routing (slot keys vs. dialogs/text fields), auto-repeat handling, slot bar states, settings validation |
+| Unit | pytest | format filter, XMP/AAE/RAW sidecar matching (shared stems, case variants), natural sort both directions, navigation and boundaries, name and slot validation, key conflicts, allowed keys and modifiers, slot modes and profile/template migration, toggle decision table, comparison keys, i18n catalog consistency, log formatter |
+| Integration | pytest with `tmp_path` | byte-identical copy incl. EXIF camera/date/GPS, safe copy and MOVE-group rollback under injected failures, MOVE with shared sidecars, MOVE crash recovery from journal, session Undo order/conflict/missing-file cases, toggle off, conflicts with case variants, symlinks/junctions pointing outside, externally deleted/modified copies, reconciliation without changes, damaged/missing application data, schema migration, lock between two instances, long paths on Windows; tests assert source hashes according to COPY/MOVE expectations |
+| UI | pytest-qt (offscreen platform) | keyboard routing (slot keys vs. dialogs/text fields), auto-repeat handling, COPY/MOVE feedback, live list/progress update after Move, Ctrl+Z success/error and no-sound behavior, help translations, slot bar states, settings validation |
 | Manual per platform | checklist in `docs/` | keyboard layouts QWERTY/QWERTZ/AZERTY, key repeat, all formats incl. HEIC, EXIF orientation, sound, languages, help, appearance |
 
 Test images are generated with Pillow at test time (including EXIF with GPS and orientation tags) or bundled under `tests/data` with a documented license; personal images are never used.

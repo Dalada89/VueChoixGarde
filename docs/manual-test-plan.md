@@ -38,6 +38,16 @@ This plan supplements automated unit/integration/UI tests. Complete it on physic
 | 22 | Interrupt a folder rename at journal-only, intermediate and completed stages; reopen and confirm recovery is consistent before reconciliation | | | | |
 | 23 | Delete confirmation defaults to Cancel; Escape cancels without deleting files, folders, slots or register entries | | | | |
 | 24 | Folder with foreign/modified/hidden entries is detached only; confirm every entry and the folder remain byte-for-byte unchanged | | | | |
+| 25 | Default profile has R → `trash` in Move mode; new slots default to Copy; changing mode is blocked while managed copies remain in that destination | | | | |
+| 26 | Move an image with XMP/AAE/RAW sidecars as one group with original names; shared sidecars remain at source and are copied to destination | | | | |
+| 27 | Occupied target for any Move group member blocks the whole action; source and destination contents remain unchanged and conflict is shown | | | | |
+| 28 | Inject a failure during a Move group; all completed moves roll back, no partial destination remains, and the source is unchanged | | | | |
+| 29 | Successful Move removes the image from the live list and updates current image/progress; success feedback and sound appear only after success | | | | |
+| 30 | `Ctrl+Z` restores moves in LIFO order, returns each image to sorted position/current focus, refreshes the list and plays no sound | | | | |
+| 31 | Undo with an occupied original name or missing destination file makes no file changes and leaves the move available for retry | | | | |
+| 32 | Undo of an externally changed moved file restores its current contents; changing folders or closing the app clears the undo stack | | | | |
+| 33 | `trash` is an ordinary direct subfolder; the app never sends moved files to the operating-system recycle bin | | | | |
+| 34 | In disposable legacy settings/profile data, eligible R/`trash` migration happens once; occupied key/name or 12 slots prevent insertion | | | | |
 
 ## Release-specific checks
 

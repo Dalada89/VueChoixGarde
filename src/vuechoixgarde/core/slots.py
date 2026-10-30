@@ -9,13 +9,21 @@ from vuechoixgarde.core.folder_names import FolderNameError, validate_folder_nam
 from vuechoixgarde.core.keys import is_allowed_slot_key
 
 
+class SlotMode(StrEnum):
+    """Supported file operations for a slot."""
+
+    COPY = "copy"
+    MOVE = "move"
+
+
 @dataclass(frozen=True)
 class Slot:
-    """One destination slot with a physical key position, optional name and color."""
+    """One destination slot with a physical key position, name, color and mode."""
 
     key_position: str
     destination_name: str | None
     color: str
+    mode: SlotMode = SlotMode.COPY
 
 
 @dataclass(frozen=True)
@@ -31,6 +39,7 @@ class ProfileError(StrEnum):
     TOO_FEW_SLOTS = "too_few_slots"
     TOO_MANY_SLOTS = "too_many_slots"
     INVALID_KEY = "invalid_key"
+    INVALID_MODE = "invalid_mode"
     DUPLICATE_KEY = "duplicate_key"
     DUPLICATE_NAME = "duplicate_name"
     INVALID_NAME = "invalid_name"
@@ -46,10 +55,11 @@ class ProfileIssue:
 
 
 DEFAULT_SLOTS = (
-    Slot("KeyW", None, "#FF9A9A"),
+    Slot("KeyW", None, "#CE93D8"),
     Slot("KeyA", None, "#64B5F6"),
     Slot("KeyS", None, "#81C784"),
     Slot("KeyD", None, "#FFD54F"),
+    Slot("KeyR", "trash", "#FF7B7B", SlotMode.MOVE),
 )
 
 
@@ -63,6 +73,8 @@ def validate_slot_profile(slots: Sequence[Slot]) -> tuple[ProfileIssue, ...]:
     keys: dict[str, list[int]] = {}
     names: dict[str, list[int]] = {}
     for index, slot in enumerate(slots):
+        if not isinstance(slot.mode, SlotMode):
+            issues.append(ProfileIssue(ProfileError.INVALID_MODE, (index,)))
         if not is_allowed_slot_key(slot.key_position):
             issues.append(ProfileIssue(ProfileError.INVALID_KEY, (index,)))
         keys.setdefault(slot.key_position, []).append(index)

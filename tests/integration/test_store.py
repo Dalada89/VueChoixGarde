@@ -8,7 +8,8 @@ from uuid import uuid4
 import pytest
 
 import vuechoixgarde.store.settings as settings_module
-from vuechoixgarde.core.slots import DEFAULT_SLOTS, Slot
+from vuechoixgarde.core.keys import ALLOWED_SLOT_CODES
+from vuechoixgarde.core.slots import DEFAULT_SLOTS, Slot, SlotMode
 from vuechoixgarde.core.temp_names import temp_file_name
 from vuechoixgarde.ports.errors import (
     SettingsStoreError,
@@ -21,13 +22,19 @@ from vuechoixgarde.ports.models import (
     FolderRenameState,
     LoadStatus,
     OperationFileRecord,
+    OperationKind,
     OperationState,
     Settings,
 )
 from vuechoixgarde.store.damage import quarantine_damaged
 from vuechoixgarde.store.paths import application_data_dir
 from vuechoixgarde.store.settings import JsonSettingsStore
-from vuechoixgarde.store.state import SQLiteStateStore, _migration_0_to_1
+from vuechoixgarde.store.state import (
+    SQLiteStateStore,
+    _migration_0_to_1,
+    _migration_1_to_2,
+    _migration_2_to_3,
+)
 
 
 def test_application_data_path_can_be_injected_and_prepared(tmp_path: Path, fixed_clock) -> None:
@@ -51,7 +58,7 @@ def test_settings_create_defaults_and_roundtrip(tmp_path: Path, fixed_clock) -> 
     assert loaded.settings == created.settings
 
     changed = Settings(
-        schema_version=1,
+        schema_version=2,
         language="fr",
         sound_enabled=False,
         sort_direction="desc",
@@ -77,7 +84,7 @@ def test_settings_atomic_write_failure_preserves_old_file(
         lambda *_args: (_ for _ in ()).throw(OSError("replace failed")),
     )
     changed = Settings(
-        schema_version=1,
+        schema_version=2,
         language="fr",
         sound_enabled=False,
         sort_direction="asc",
@@ -104,15 +111,29 @@ def test_settings_atomic_write_failure_preserves_old_file(
         ("learned_key_labels", {"KeyW": "long"}),
         (
             "global_slot_template",
-            [{"key_position": "KeyW", "destination_name": "CON", "color": "#112233"}],
+            [
+                {
+                    "key_position": "KeyW",
+                    "destination_name": "CON",
+                    "color": "#112233",
+                    "mode": "copy",
+                }
+            ],
         ),
         (
             "global_slot_template",
-            [{"key_position": "ArrowLeft", "destination_name": None, "color": "#112233"}],
+            [
+                {
+                    "key_position": "ArrowLeft",
+                    "destination_name": None,
+                    "color": "#112233",
+                    "mode": "copy",
+                }
+            ],
         ),
         (
             "global_slot_template",
-            [{"key_position": "KeyW", "destination_name": None, "color": "red"}],
+            [{"key_position": "KeyW", "destination_name": None, "color": "red", "mode": "copy"}],
         ),
     ],
 )
@@ -155,6 +176,85 @@ def test_quarantine_uses_a_unique_name_without_replacing_existing_file(
     assert not damaged.exists()
 
 
+@pytest.mark.parametrize(
+    ("old_slots", "expected_move_slot"),
+    [
+        (
+            (
+                Slot("KeyW", None, "#123456"),
+                Slot("KeyA", None, "#123456"),
+                Slot("KeyS", None, "#123456"),
+                Slot("KeyD", None, "#123456"),
+            ),
+            True,
+        ),
+        (
+            (
+                Slot("KeyW", None, "#123456"),
+                Slot("KeyA", None, "#123456"),
+                Slot("KeyS", None, "#123456"),
+                Slot("KeyR", None, "#123456"),
+            ),
+            False,
+        ),
+        (
+            (
+                Slot("KeyW", None, "#123456"),
+                Slot("KeyA", None, "#123456"),
+                Slot("KeyS", None, "#123456"),
+                Slot("KeyQ", "Trash", "#123456"),
+            ),
+            False,
+        ),
+        (
+            tuple(Slot(key, None, "#123456") for key in sorted(ALLOWED_SLOT_CODES)[:12]),
+            False,
+        ),
+    ],
+    ids=("eligible", "key-occupied", "name-occupied", "twelve-slots"),
+)
+def test_state_store_migrates_legacy_profile_slots_once(
+    tmp_path: Path, fixed_clock, old_slots: tuple[Slot, ...], expected_move_slot: bool
+) -> None:
+    store = SQLiteStateStore(tmp_path / "app", fixed_clock)
+    with sqlite3.connect(store.path) as connection:
+        _migration_0_to_1(connection)
+        _migration_1_to_2(connection)
+        connection.execute(
+            "INSERT INTO profiles(id, folder_identity, display_path, created_at, updated_at) "
+            "VALUES ('profile-id', '/source', '/source', 'created', 'updated')"
+        )
+        connection.executemany(
+            "INSERT INTO slots(profile_id, slot_order, key_position, destination_name, color) "
+            "VALUES ('profile-id', ?, ?, ?, ?)",
+            [
+                (index, slot.key_position, slot.destination_name, slot.color)
+                for index, slot in enumerate(old_slots)
+            ],
+        )
+
+    result = store.load()
+
+    assert result.status is LoadStatus.LOADED
+    profile = store.get_profile_by_identity("/source")
+    assert profile is not None
+    expected_slots = old_slots + (
+        (Slot("KeyR", "trash", "#FF7B7B", SlotMode.MOVE),) if expected_move_slot else ()
+    )
+    assert profile.slots == expected_slots
+    legacy_slots = profile.slots[:-1] if expected_move_slot else profile.slots
+    assert all(slot.mode is SlotMode.COPY for slot in legacy_slots)
+    with store._connect() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+
+    if expected_move_slot:
+        store.replace_profile_slots(profile.id, old_slots)
+        assert store.load().status is LoadStatus.LOADED
+        unchanged = store.get_profile_by_identity("/source")
+        assert unchanged is not None
+        assert unchanged.slots == old_slots
+
+
 def test_state_store_migrates_version_one_database_without_losing_profiles(
     tmp_path: Path, fixed_clock
 ) -> None:
@@ -171,7 +271,7 @@ def test_state_store_migrates_version_one_database_without_losing_profiles(
     result = store.load()
     assert result.status is LoadStatus.LOADED
     with store._connect() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         assert (
             connection.execute(
                 "SELECT folder_identity FROM profiles WHERE id = 'profile-id'"
@@ -196,7 +296,7 @@ def test_state_store_creates_schema_and_roundtrips_profiles_and_register(
     with store._connect() as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].casefold() == "wal"
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         rename_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(folder_renames)")
         }
@@ -254,6 +354,74 @@ def test_state_store_creates_schema_and_roundtrips_profiles_and_register(
     assert store.copy_records(profile.id, "/old/source/Best", "photo.jpg") == (copy,)
     store.remove_copy_record(profile.id, "/old/source/Best", "photo.jpg")
     assert store.copy_records(profile.id) == ()
+
+
+def test_mixed_slot_modes_and_copy_records_survive_store_roundtrip(
+    tmp_path: Path, fixed_clock
+) -> None:
+    store = SQLiteStateStore(tmp_path / "app", fixed_clock)
+    store.load()
+    slots = (
+        Slot("KeyW", "Copied", "#aabbcc", SlotMode.COPY),
+        Slot("KeyR", "Moved", "#FF7B7B", SlotMode.MOVE),
+    )
+    profile = store.create_profile_from_template("/source", "/source", slots)
+    copy_record = _add_copy(store, profile.id, "/source", "/source/Copied", "photo.png")
+    move_record = _add_copy(store, profile.id, "/source", "/source/Moved", "photo.png")
+
+    loaded = store.get_profile_by_identity("/source")
+
+    assert loaded is not None
+    assert loaded.slots == slots
+    assert store.copy_records(profile.id, "/source/Copied") == (copy_record,)
+    assert store.copy_records(profile.id, "/source/Moved") == (move_record,)
+
+
+def test_move_operation_journal_roundtrips_origin_and_file_roles_without_copies(
+    tmp_path: Path, fixed_clock
+) -> None:
+    store = SQLiteStateStore(tmp_path / "app", fixed_clock)
+    store.load()
+    profile = store.create_profile_from_template("/source", "/source", DEFAULT_SLOTS)
+    operation_id = uuid4().hex
+    digest = hashlib.sha256(b"moved").hexdigest()
+    files = (
+        OperationFileRecord(
+            0, temp_file_name(operation_id, 0), "image.jpg", 5, digest, moves_source=True
+        ),
+        OperationFileRecord(
+            1, temp_file_name(operation_id, 1), "shared.xmp", 5, digest, moves_source=False
+        ),
+    )
+
+    operation = store.start_operation(
+        operation_id,
+        profile.id,
+        "Sorted",
+        files,
+        kind=OperationKind.MOVE,
+        source_folder="/source",
+    )
+
+    assert operation.kind is OperationKind.MOVE
+    assert operation.source_folder == "/source"
+    assert store.unfinished_operations() == (operation,)
+    store.complete_operation(operation_id, ())
+    assert store.copy_records(profile.id) == ()
+    with store._connect() as connection:
+        row = connection.execute(
+            "SELECT kind, source_folder, state FROM operations WHERE id = ?", (operation_id,)
+        ).fetchone()
+        file_rows = connection.execute(
+            "SELECT final_name, moves_source FROM operation_files "
+            'WHERE operation_id = ? ORDER BY "index"',
+            (operation_id,),
+        ).fetchall()
+    assert tuple(row) == ("move", "/source", "done")
+    assert tuple(tuple(file_row) for file_row in file_rows) == (
+        ("image.jpg", 1),
+        ("shared.xmp", 0),
+    )
 
 
 def test_complete_operation_rolls_back_register_and_done_state_together(
@@ -349,7 +517,25 @@ def test_corrupt_sqlite_is_damaged_and_unchanged(tmp_path: Path, fixed_clock) ->
     assert path.read_bytes() == original
 
 
-def test_existing_version_zero_database_migrates_to_version_two(
+def test_failed_state_migration_keeps_incomplete_database_unchanged(
+    tmp_path: Path, fixed_clock
+) -> None:
+    root = tmp_path / "app"
+    root.mkdir()
+    path = root / "state.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE profiles(id TEXT PRIMARY KEY)")
+        connection.execute("PRAGMA user_version = 2")
+    original = path.read_bytes()
+
+    result = SQLiteStateStore(root, fixed_clock).load()
+
+    assert result.status is LoadStatus.DAMAGED
+    assert not result.register_available
+    assert path.read_bytes() == original
+
+
+def test_existing_version_zero_database_migrates_to_version_four(
     tmp_path: Path, fixed_clock
 ) -> None:
     root = tmp_path / "app"
@@ -361,7 +547,7 @@ def test_existing_version_zero_database_migrates_to_version_two(
     result = SQLiteStateStore(root, fixed_clock).load()
     assert result.status is LoadStatus.LOADED
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         tables = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -376,7 +562,9 @@ def test_existing_version_zero_database_migrates_to_version_two(
     }.issubset(tables)
 
 
-def test_existing_version_one_database_migrates_to_version_two(tmp_path: Path, fixed_clock) -> None:
+def test_existing_version_one_database_migrates_to_version_four(
+    tmp_path: Path, fixed_clock
+) -> None:
     root = tmp_path / "app"
     root.mkdir()
     path = root / "state.sqlite3"
@@ -386,13 +574,52 @@ def test_existing_version_one_database_migrates_to_version_two(tmp_path: Path, f
     result = SQLiteStateStore(root, fixed_clock).load()
     assert result.status is LoadStatus.LOADED
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         assert (
             connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'folder_renames'"
             ).fetchone()
             is not None
         )
+
+
+def test_v3_operation_rows_migrate_to_copy_defaults(tmp_path: Path, fixed_clock) -> None:
+    root = tmp_path / "app"
+    root.mkdir()
+    path = root / "state.sqlite3"
+    operation_id = uuid4().hex
+    temp_name = temp_file_name(operation_id, 0)
+    digest = hashlib.sha256(b"legacy").hexdigest()
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        _migration_0_to_1(connection)
+        _migration_1_to_2(connection)
+        _migration_2_to_3(connection)
+        connection.execute(
+            "INSERT INTO profiles(id, folder_identity, display_path, created_at, updated_at) "
+            "VALUES ('legacy-profile', '/source', '/source', 'created', 'updated')"
+        )
+        connection.execute(
+            "INSERT INTO operations(id, profile_id, destination_name, "
+            "state, started_at, updated_at) "
+            "VALUES (?, 'legacy-profile', 'Sorted', 'started', 'started', 'updated')",
+            (operation_id,),
+        )
+        connection.execute(
+            'INSERT INTO operation_files(operation_id, "index", temp_name, final_name, '
+            "expected_size, expected_sha256) VALUES (?, 0, ?, 'image.jpg', 6, ?)",
+            (operation_id, temp_name, digest),
+        )
+
+    store = SQLiteStateStore(root, fixed_clock)
+    assert store.load().status is LoadStatus.LOADED
+    (operation,) = store.unfinished_operations()
+
+    assert operation.kind is OperationKind.COPY
+    assert operation.source_folder is None
+    assert operation.files[0].moves_source is False
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def _profile_slots(store: SQLiteStateStore, identity: str) -> tuple[Slot, ...]:

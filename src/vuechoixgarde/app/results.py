@@ -17,6 +17,7 @@ class FolderManagementReason(StrEnum):
     ROLLBACK_FAILED = "rollback_failed"
     RECOVERY_FAILED = "recovery_failed"
     UNAVAILABLE = "unavailable"
+    MODE_CHANGE_BLOCKED = "mode_change_blocked"
 
 
 class FolderManagementError(Exception):
@@ -28,11 +29,13 @@ class FolderManagementError(Exception):
         *,
         old_name: str | None = None,
         new_name: str | None = None,
+        destination_name: str | None = None,
         names: tuple[str, ...] = (),
     ) -> None:
         self.reason = reason
         self.old_name = old_name
         self.new_name = new_name
+        self.destination_name = destination_name
         self.names = names
         super().__init__(reason.value)
 

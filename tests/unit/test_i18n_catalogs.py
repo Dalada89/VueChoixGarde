@@ -43,6 +43,42 @@ def test_help_shortcuts_use_real_line_breaks() -> None:
         assert "\\n" not in shortcuts
 
 
+def test_move_help_and_feedback_are_translated() -> None:
+    catalogs = {language: _catalog(language) for language in ("de", "en", "fr")}
+    help_phrases = {
+        "de": (
+            "nur Slots im Modus",
+            "aktuellen Ordnersitzung",
+            "Ordnerwechsel",
+            "normaler Ordner",
+            "selbst leeren",
+            "Papierkorb des Betriebssystems",
+        ),
+        "en": (
+            "only slots in Move mode change source files",
+            "current folder session",
+            "changing folders clears",
+            "ordinary folder",
+            "empty yourself",
+            "operating-system trash",
+        ),
+        "fr": (
+            "seuls les emplacements en mode Déplacer modifient les fichiers source",
+            "session du dossier actuel",
+            "changer de dossier efface",
+            "dossier ordinaire",
+            "vider vous-même",
+            "corbeille du système",
+        ),
+    }
+    for language, catalog in catalogs.items():
+        assert "move_success" in catalog
+        assert "undo_success" in catalog
+        assert set(_PLACEHOLDER.findall(catalog["move_success"])) == {"key", "name"}
+        assert set(_PLACEHOLDER.findall(catalog["undo_success"])) == {"name"}
+        assert all(phrase in catalog["help_behavior"] for phrase in help_phrases[language])
+
+
 def test_literal_text_calls_resolve_in_english_catalog() -> None:
     source = Path(texts.__file__).parents[1] / "ui"
     referenced: set[str] = set()

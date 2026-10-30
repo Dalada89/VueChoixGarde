@@ -22,7 +22,7 @@ from uuid import uuid4
 from vuechoixgarde.core.comparison import comparison_key
 from vuechoixgarde.core.folder_names import validate_folder_name
 from vuechoixgarde.core.formats import is_supported_image
-from vuechoixgarde.core.temp_names import is_reserved_temp_name
+from vuechoixgarde.core.temp_names import is_reserved_temp_name, temp_file_name
 from vuechoixgarde.ports.errors import FileSystemError, FileSystemErrorReason
 from vuechoixgarde.ports.models import (
     DestinationEntry,
@@ -791,3 +791,160 @@ class LocalFileSystem:
     delete_verified_file = staticmethod(delete_verified_file)
     delete_modified_copy = staticmethod(delete_modified_copy)
     delete_own_temp_file = staticmethod(delete_own_temp_file)
+
+    @staticmethod
+    def _file_groups(move_names: tuple[str, ...], copy_names: tuple[str, ...]) -> tuple[str, ...]:
+        names = move_names + copy_names
+        if any(not _is_simple_name(name) for name in names) or len(
+            {comparison_key(name) for name in names}
+        ) != len(names):
+            raise _raise_fs_error(FileSystemErrorReason.INVALID_NAME)
+        return names
+
+    def _move_file(self, source_path: Path, destination_path: Path) -> None:
+        try:
+            if sys.platform == "win32":
+                extended_path(source_path).rename(extended_path(destination_path))
+            else:
+                _ctypes_no_replace(source_path, destination_path)
+        except OSError as error:
+            reason = (
+                FileSystemErrorReason.NAME_CONFLICT
+                if error.errno == errno.EEXIST
+                else FileSystemErrorReason.IO_ERROR
+            )
+            raise _raise_fs_error(reason, destination_path, str(error)) from error
+
+    def move_file_group(
+        self,
+        source_root: Path,
+        destination_folder: Path,
+        move_names: tuple[str, ...],
+        copy_names: tuple[str, ...] = (),
+    ) -> tuple[FileFingerprint, ...]:
+        """Move a verified group, rolling back on errors and copying shared sidecars."""
+        names = self._file_groups(move_names, copy_names)
+        root = _source_root(source_root)
+        destination = _contained_destination(root, destination_folder)
+        if not names:
+            return ()
+        source_fingerprints = {name: fingerprint_file(root, root / name) for name in names}
+        existing = {comparison_key(name) for name in _destination_names(destination)}
+        if any(comparison_key(name) in existing for name in names):
+            conflict = next(name for name in names if comparison_key(name) in existing)
+            raise _raise_fs_error(FileSystemErrorReason.NAME_CONFLICT, destination / conflict)
+
+        operation_id = uuid4().hex
+        copy_temps: list[tuple[str, str]] = []
+        copied_names: list[str] = []
+        moved_names: list[str] = []
+        try:
+            for index, name in enumerate(copy_names):
+                temp_name = temp_file_name(operation_id, index)
+                fingerprint = self.copy_to_temp(root, destination, name, temp_name)
+                copy_temps.append((name, temp_name))
+                expected = source_fingerprints[name]
+                if (fingerprint.size, fingerprint.sha256) != (expected.size, expected.sha256):
+                    raise _raise_fs_error(FileSystemErrorReason.FILE_CHANGED, root / name)
+                self.finalize_temp_file(root, destination, temp_name, name)
+                copied_names.append(name)
+            for name in move_names:
+                self._move_file(root / name, destination / name)
+                moved_names.append(name)
+                moved = fingerprint_file(root, destination / name)
+                expected = source_fingerprints[name]
+                if (moved.size, moved.sha256) != (expected.size, expected.sha256):
+                    raise _raise_fs_error(FileSystemErrorReason.FILE_CHANGED, destination / name)
+        except Exception as error:
+            rollback_errors: list[Exception] = []
+            for name in reversed(moved_names):
+                try:
+                    self._move_file(destination / name, root / name)
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
+            for name in reversed(copied_names):
+                try:
+                    fingerprint = source_fingerprints[name]
+                    self.delete_verified_file(
+                        root, destination, name, fingerprint.size, fingerprint.sha256
+                    )
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
+            for _name, temp_name in copy_temps:
+                try:
+                    self.delete_own_temp_file(root, destination, temp_name)
+                except FileSystemError as cleanup_error:
+                    if cleanup_error.reason is not FileSystemErrorReason.DELETE_REFUSED:
+                        rollback_errors.append(cleanup_error)
+            if rollback_errors:
+                raise _raise_fs_error(
+                    FileSystemErrorReason.IO_ERROR,
+                    destination,
+                    "move rollback incomplete; retained files were not discarded",
+                ) from error
+            raise
+        return tuple(source_fingerprints[name] for name in names)
+
+    def undo_move_file_group(
+        self,
+        source_root: Path,
+        destination_folder: Path,
+        move_names: tuple[str, ...],
+        copy_names: tuple[str, ...],
+        fingerprints: tuple[FileFingerprint, ...],
+    ) -> None:
+        """Restore only a complete, unchanged group and never replace source names."""
+        names = self._file_groups(move_names, copy_names)
+        if len(fingerprints) != len(names):
+            raise _raise_fs_error(FileSystemErrorReason.INVALID_NAME)
+        root = _source_root(source_root)
+        destination = _contained_destination(root, destination_folder)
+        expected = dict(zip(names, fingerprints, strict=True))
+        for name in names:
+            _validate_destination_file(root, destination, name)
+            current = fingerprint_file(root, destination / name)
+            original = expected[name]
+            if (current.size, current.sha256) != (original.size, original.sha256):
+                raise _raise_fs_error(FileSystemErrorReason.FILE_CHANGED, destination / name)
+        for name in move_names:
+            if comparison_key(name) in {comparison_key(item) for item in _destination_names(root)}:
+                raise _raise_fs_error(FileSystemErrorReason.NAME_CONFLICT, root / name)
+        for name in copy_names:
+            _validate_destination_file(root, root, name)
+            current = fingerprint_file(root, root / name)
+            original = expected[name]
+            if (current.size, current.sha256) != (original.size, original.sha256):
+                raise _raise_fs_error(FileSystemErrorReason.FILE_CHANGED, root / name)
+
+        restored_names: list[str] = []
+        deleted_copies: list[str] = []
+        try:
+            for name in move_names:
+                self._move_file(destination / name, root / name)
+                restored_names.append(name)
+            for name in copy_names:
+                original = expected[name]
+                self.delete_verified_file(root, destination, name, original.size, original.sha256)
+                deleted_copies.append(name)
+        except Exception as error:
+            rollback_errors: list[Exception] = []
+            operation_id = uuid4().hex
+            for index, name in enumerate(deleted_copies):
+                try:
+                    temp_name = temp_file_name(operation_id, index)
+                    self.copy_to_temp(root, destination, name, temp_name)
+                    self.finalize_temp_file(root, destination, temp_name, name)
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
+            for name in reversed(restored_names):
+                try:
+                    self._move_file(root / name, destination / name)
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
+            if rollback_errors:
+                raise _raise_fs_error(
+                    FileSystemErrorReason.IO_ERROR,
+                    destination,
+                    "undo rollback incomplete; retained files were not discarded",
+                ) from error
+            raise

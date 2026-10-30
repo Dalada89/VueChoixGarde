@@ -8,7 +8,8 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
-from vuechoixgarde.core.slots import Slot, validate_slot_profile
+from vuechoixgarde.core.comparison import comparison_key
+from vuechoixgarde.core.slots import Slot, SlotMode, validate_slot_profile
 from vuechoixgarde.core.temp_names import temp_file_name
 from vuechoixgarde.ports.clock import Clock
 from vuechoixgarde.ports.errors import SettingsStoreError, StateStoreError, StateStoreErrorReason
@@ -18,6 +19,7 @@ from vuechoixgarde.ports.models import (
     FolderRenameState,
     LoadStatus,
     OperationFileRecord,
+    OperationKind,
     OperationRecord,
     OperationState,
     ProfileRecord,
@@ -26,7 +28,7 @@ from vuechoixgarde.ports.models import (
 from vuechoixgarde.store.damage import quarantine_damaged
 from vuechoixgarde.store.paths import prepare_application_data
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 4
 
 
 def _iso_utc(value: datetime) -> str:
@@ -126,6 +128,73 @@ def _migration_1_to_2(connection: sqlite3.Connection) -> None:
         raise
 
 
+def _migration_2_to_3(connection: sqlite3.Connection) -> None:
+    """Persist slot modes and migrate eligible legacy profiles to the move slot."""
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "ALTER TABLE slots ADD COLUMN mode TEXT NOT NULL DEFAULT 'copy' "
+            "CHECK (mode IN ('copy', 'move'))"
+        )
+        profiles = connection.execute("SELECT id FROM profiles").fetchall()
+        for profile in profiles:
+            rows = connection.execute(
+                "SELECT slot_order, key_position, destination_name, color FROM slots "
+                "WHERE profile_id = ? ORDER BY slot_order",
+                (profile["id"],),
+            ).fetchall()
+            slots = tuple(
+                Slot(row["key_position"], row["destination_name"], row["color"]) for row in rows
+            )
+            if any(
+                not isinstance(slot.key_position, str)
+                or (
+                    slot.destination_name is not None and not isinstance(slot.destination_name, str)
+                )
+                or not isinstance(slot.color, str)
+                for slot in slots
+            ):
+                raise ValueError("profile contains invalid slot data")
+            key_is_free = all(slot.key_position != "KeyR" for slot in slots)
+            name_is_free = all(
+                slot.destination_name is None
+                or comparison_key(slot.destination_name) != comparison_key("trash")
+                for slot in slots
+            )
+            if len(slots) < 12 and key_is_free and name_is_free:
+                next_order = max((row["slot_order"] for row in rows), default=-1) + 1
+                connection.execute(
+                    "INSERT INTO slots(profile_id, slot_order, key_position, destination_name, "
+                    "color, mode) VALUES (?, ?, ?, ?, ?, ?)",
+                    (profile["id"], next_order, "KeyR", "trash", "#FF7B7B", SlotMode.MOVE.value),
+                )
+        connection.execute("PRAGMA user_version = 3")
+        connection.commit()
+    except (sqlite3.Error, TypeError, ValueError):
+        connection.rollback()
+        raise
+
+
+def _migration_3_to_4(connection: sqlite3.Connection) -> None:
+    """Add move origin and per-file source ownership to the operation journal."""
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "ALTER TABLE operations ADD COLUMN kind TEXT NOT NULL DEFAULT 'copy' "
+            "CHECK (kind IN ('copy', 'move'))"
+        )
+        connection.execute("ALTER TABLE operations ADD COLUMN source_folder TEXT")
+        connection.execute(
+            "ALTER TABLE operation_files ADD COLUMN moves_source INTEGER NOT NULL DEFAULT 0 "
+            "CHECK (moves_source IN (0, 1))"
+        )
+        connection.execute("PRAGMA user_version = 4")
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+
+
 class SQLiteStateStore:
     """A short-lived-connection SQLite implementation of `StateStore`."""
 
@@ -185,6 +254,12 @@ class SQLiteStateStore:
                     version = 1
                 if version == 1:
                     _migration_1_to_2(connection)
+                    version = 2
+                if version == 2:
+                    _migration_2_to_3(connection)
+                    version = 3
+                if version == 3:
+                    _migration_3_to_4(connection)
                 connection.execute("PRAGMA journal_mode = WAL")
                 connection.execute("PRAGMA foreign_keys = ON")
             finally:
@@ -257,10 +332,18 @@ class SQLiteStateStore:
         connection: sqlite3.Connection, profile_id: str, slots: Sequence[Slot]
     ) -> None:
         connection.executemany(
-            "INSERT INTO slots(profile_id, slot_order, key_position, destination_name, color) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO slots("
+            "profile_id, slot_order, key_position, destination_name, color, mode) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             [
-                (profile_id, index, slot.key_position, slot.destination_name, slot.color)
+                (
+                    profile_id,
+                    index,
+                    slot.key_position,
+                    slot.destination_name,
+                    slot.color,
+                    slot.mode.value,
+                )
                 for index, slot in enumerate(slots)
             ],
         )
@@ -286,12 +369,18 @@ class SQLiteStateStore:
     @staticmethod
     def _read_profile(connection: sqlite3.Connection, row: sqlite3.Row) -> ProfileRecord:
         rows = connection.execute(
-            "SELECT key_position, destination_name, color FROM slots "
+            "SELECT key_position, destination_name, color, mode FROM slots "
             "WHERE profile_id = ? ORDER BY slot_order",
             (row["id"],),
         ).fetchall()
         slots = tuple(
-            Slot(slot["key_position"], slot["destination_name"], slot["color"]) for slot in rows
+            Slot(
+                slot["key_position"],
+                slot["destination_name"],
+                slot["color"],
+                SlotMode(slot["mode"]),
+            )
+            for slot in rows
         )
         return ProfileRecord(
             id=row["id"],
@@ -407,6 +496,7 @@ class SQLiteStateStore:
                     "key_position": slot.key_position,
                     "destination_name": slot.destination_name,
                     "color": slot.color,
+                    "mode": slot.mode.value,
                 }
                 for slot in slots
             ],
@@ -421,7 +511,12 @@ class SQLiteStateStore:
             if not isinstance(decoded, list):
                 raise ValueError("slot data must be a list")
             slots = tuple(
-                Slot(item["key_position"], item["destination_name"], item["color"])
+                Slot(
+                    item["key_position"],
+                    item["destination_name"],
+                    item["color"],
+                    SlotMode(item.get("mode", SlotMode.COPY.value)),
+                )
                 for item in decoded
                 if isinstance(item, dict)
             )
@@ -746,6 +841,20 @@ class SQLiteStateStore:
                 StateStoreErrorReason.IO_ERROR, path=self.path, detail=str(error)
             ) from error
 
+    def has_managed_copies(self, profile_id: str, destination_folder: str) -> bool:
+        """Check whether the profile has registered copies in the destination folder."""
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT 1 FROM copies WHERE profile_id = ? AND destination_folder = ? LIMIT 1",
+                    (profile_id, destination_folder),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise StateStoreError(
+                StateStoreErrorReason.IO_ERROR, path=self.path, detail=str(error)
+            ) from error
+        return row is not None
+
     def copy_records(
         self,
         profile_id: str,
@@ -809,9 +918,17 @@ class SQLiteStateStore:
         profile_id: str,
         destination_name: str,
         files: Sequence[OperationFileRecord],
+        *,
+        kind: OperationKind = OperationKind.COPY,
+        source_folder: str | None = None,
     ) -> OperationRecord:
         """Commit a started operation and every expected file before filesystem writes (FR-046)."""
         timestamp = self._timestamp()
+        if (kind is OperationKind.MOVE) != (source_folder is not None):
+            raise StateStoreError(
+                StateStoreErrorReason.INVALID_DATA,
+                detail="move operations require a source folder and copies must omit it",
+            )
         try:
             temp_file_name(operation_id, 0)
         except ValueError as error:
@@ -845,15 +962,23 @@ class SQLiteStateStore:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
-                    "INSERT INTO operations(id, profile_id, destination_name, state, "
-                    "started_at, updated_at) "
-                    "VALUES (?, ?, ?, 'started', ?, ?)",
-                    (operation_id, profile_id, destination_name, timestamp, timestamp),
+                    "INSERT INTO operations(id, profile_id, destination_name, kind, source_folder, "
+                    "state, started_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'started', ?, ?)",
+                    (
+                        operation_id,
+                        profile_id,
+                        destination_name,
+                        kind.value,
+                        source_folder,
+                        timestamp,
+                        timestamp,
+                    ),
                 )
                 connection.executemany(
                     'INSERT INTO operation_files(operation_id, "index", temp_name, final_name, '
-                    "expected_size, expected_sha256) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "expected_size, expected_sha256, moves_source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     [
                         (
                             operation_id,
@@ -862,6 +987,7 @@ class SQLiteStateStore:
                             file.final_name,
                             file.expected_size,
                             file.expected_sha256,
+                            int(file.moves_source),
                         )
                         for file in ordered_files
                     ],
@@ -874,6 +1000,8 @@ class SQLiteStateStore:
                     timestamp,
                     timestamp,
                     ordered_files,
+                    kind,
+                    source_folder,
                 )
         except sqlite3.Error as error:
             raise StateStoreError(
@@ -975,8 +1103,8 @@ class SQLiteStateStore:
                 result: list[OperationRecord] = []
                 for row in rows:
                     file_rows = connection.execute(
-                        'SELECT "index", temp_name, final_name, expected_size, expected_sha256 '
-                        'FROM operation_files WHERE operation_id = ? ORDER BY "index"',
+                        'SELECT "index", temp_name, final_name, expected_size, expected_sha256, '
+                        'moves_source FROM operation_files WHERE operation_id = ? ORDER BY "index"',
                         (row["id"],),
                     ).fetchall()
                     files = tuple(
@@ -986,6 +1114,7 @@ class SQLiteStateStore:
                             final_name=file_row["final_name"],
                             expected_size=file_row["expected_size"],
                             expected_sha256=file_row["expected_sha256"],
+                            moves_source=bool(file_row["moves_source"]),
                         )
                         for file_row in file_rows
                     )
@@ -998,6 +1127,8 @@ class SQLiteStateStore:
                             row["started_at"],
                             row["updated_at"],
                             files,
+                            OperationKind(row["kind"]),
+                            row["source_folder"],
                         )
                     )
                 return tuple(result)

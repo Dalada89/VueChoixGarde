@@ -5,7 +5,7 @@ from fakes import SimulatedCrash
 
 from vuechoixgarde.app.results import FolderManagementError, FolderRename, SlotState
 from vuechoixgarde.bootstrap import create_runtime
-from vuechoixgarde.core.slots import Slot
+from vuechoixgarde.core.slots import Slot, SlotMode
 
 
 def _active_profile(runtime):
@@ -14,7 +14,7 @@ def _active_profile(runtime):
     return session.profile
 
 
-def _save_rename(runtime, old_name: str, new_name: str):
+def _save_rename(runtime, old_name: str, new_name: str, mode: SlotMode = SlotMode.COPY):
     settings = runtime.service.settings
     return runtime.service.save_settings_and_profile_slots(
         reopen_last_folder=settings.reopen_last_folder,
@@ -22,7 +22,7 @@ def _save_rename(runtime, old_name: str, new_name: str):
         language=settings.language,
         sound_enabled=settings.sound_enabled,
         global_slot_template=settings.global_slot_template,
-        profile_slots=(Slot("KeyW", new_name, "#4488CC"),),
+        profile_slots=(Slot("KeyW", new_name, "#4488CC", mode),),
         learned_key_labels=settings.learned_key_labels,
         renames=(FolderRename(old_name, new_name),),
     )
@@ -63,6 +63,43 @@ def test_saved_slot_rename_moves_folder_and_copy_register(tmp_path: Path, source
         result, _ = runtime.service.execute_plan(plan, confirmed_modified=False)
         assert result.status.value == "ok"
         assert not (source / "After" / image.name).exists()
+    finally:
+        runtime.shutdown()
+
+
+def test_move_slot_rename_preserves_file_and_mode(tmp_path: Path, source_guard) -> None:
+    source = source_guard.root
+    image = source / "photo.jpg"
+    image.write_bytes(b"moved image bytes")
+    runtime = create_runtime(tmp_path / "application-data")
+    runtime.service.save_preferences(
+        reopen_last_folder=False,
+        sort_direction="asc",
+        global_slot_template=(Slot("KeyR", "Before", "#FF7B7B", SlotMode.MOVE),),
+    )
+    try:
+        runtime.service.open_folder(source)
+        plan = runtime.service.plan_slot(image.name, 0)
+        result, _ = runtime.service.execute_plan(plan, confirmed_modified=False)
+        assert result.status.value == "ok"
+        moved_image = source / "Before" / image.name
+        assert moved_image.read_bytes() == b"moved image bytes"
+        assert not image.exists()
+        source_guard.seal(allowed_destinations={"Before", "After"})
+
+        view = _save_rename(runtime, "Before", "After", mode=SlotMode.MOVE)
+
+        assert view is not None
+        assert not (source / "Before").exists()
+        assert (source / "After" / image.name).read_bytes() == b"moved image bytes"
+        assert _active_profile(runtime).slots[0].destination_name == "After"
+        assert _active_profile(runtime).slots[0].mode is SlotMode.MOVE
+        assert (
+            runtime.service.state_store.copy_records(
+                _active_profile(runtime).id, str(source / "After")
+            )
+            == ()
+        )
     finally:
         runtime.shutdown()
 

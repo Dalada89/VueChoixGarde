@@ -5,7 +5,7 @@ from vuechoixgarde.app.results import (
     FolderDeletionStatus,
 )
 from vuechoixgarde.bootstrap import create_runtime
-from vuechoixgarde.core.slots import Slot
+from vuechoixgarde.core.slots import Slot, SlotMode
 from vuechoixgarde.ports.errors import FileSystemError, FileSystemErrorReason
 
 
@@ -209,6 +209,53 @@ def test_rmdir_failure_keeps_slot_and_cleans_register_for_deleted_copy(
         assert (source / "Target").is_dir()
         assert not (source / "Target" / "photo.jpg").exists()
         assert _current_profile(runtime).slots[0].destination_name == "Target"
+        assert runtime.service.state_store.copy_records(_current_profile(runtime).id) == ()
+    finally:
+        runtime.shutdown()
+
+
+def test_move_destination_is_detached_without_deleting_moved_group(
+    tmp_path: Path, source_guard
+) -> None:
+    source = source_guard.root
+    image = source / "photo.jpg"
+    image.write_bytes(b"moved image bytes")
+    shared_image = source / "photo.png"
+    shared_image.write_bytes(b"remaining image bytes")
+    shared_sidecar = source / "photo.xmp"
+    shared_sidecar.write_bytes(b"shared sidecar bytes")
+    runtime = create_runtime(tmp_path / "application-data")
+    runtime.service.save_preferences(
+        reopen_last_folder=False,
+        sort_direction="asc",
+        global_slot_template=(Slot("KeyR", "Target", "#FF7B7B", SlotMode.MOVE),),
+    )
+    runtime.service.open_folder(source)
+    try:
+        plan = runtime.service.plan_slot(image.name, 0)
+        move_result, _ = runtime.service.execute_plan(plan, confirmed_modified=False)
+        assert move_result.status.value == "ok"
+        moved_image = source / "Target" / image.name
+        moved_sidecar = source / "Target" / shared_sidecar.name
+        assert moved_image.read_bytes() == b"moved image bytes"
+        assert moved_sidecar.read_bytes() == b"shared sidecar bytes"
+        assert not image.exists()
+        assert shared_sidecar.read_bytes() == b"shared sidecar bytes"
+        source_guard.seal(allowed_destinations={"Target"})
+
+        check = runtime.service.inspect_destination_folder(0)
+        assert check.case is FolderDeletionCase.FOREIGN_ENTRIES
+        assert set(check.foreign_names) == {image.name, shared_sidecar.name}
+
+        result = runtime.service.delete_destination_folder(0, check)
+
+        assert result.status is FolderDeletionStatus.DETACHED
+        assert moved_image.read_bytes() == b"moved image bytes"
+        assert moved_sidecar.read_bytes() == b"shared sidecar bytes"
+        assert shared_image.read_bytes() == b"remaining image bytes"
+        assert shared_sidecar.read_bytes() == b"shared sidecar bytes"
+        assert _current_profile(runtime).slots[0].destination_name is None
+        assert _current_profile(runtime).slots[0].mode is SlotMode.MOVE
         assert runtime.service.state_store.copy_records(_current_profile(runtime).id) == ()
     finally:
         runtime.shutdown()

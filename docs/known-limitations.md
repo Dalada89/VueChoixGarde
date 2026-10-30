@@ -15,4 +15,7 @@
 - **Folder name swaps:** two existing destination folders cannot exchange names in one save; use two separate saves so each no-replace rename has a free target.
 - **Filesystem rename support:** a filesystem without an atomic no-replace directory rename primitive cannot safely rename destinations; the app fails closed instead of falling back to a replacing rename.
 - **Destination deletion:** verified copies are permanently unlinked, not moved to the recycle bin. Folders with any foreign or changed entry are left intact and only detached from the profile.
+- **Move undo:** `Ctrl+Z` is available only in the current folder session; its LIFO stack is cleared on folder change or app exit, and there is no redo or post-restart undo. If the original filename is occupied or a moved file is missing from its remembered destination, undo leaves the files unchanged and keeps the operation pending for another attempt. A changed moved file is restored with its current contents.
+- **Trash destination:** `trash` is an ordinary source-folder subdirectory. The app does not use the operating-system recycle bin; users manage that folder manually.
+- **RAW sidecars:** known RAW extensions may be grouped and moved/copied with same-stem supported images, but RAW files are not listed or decoded as images.
 - **Performance:** documented local smoke measurements are informative only and are not a cross-platform performance guarantee.

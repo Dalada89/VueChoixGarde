@@ -19,7 +19,9 @@ from pytestqt.qtbot import QtBot
 
 from vuechoixgarde.app.results import FolderDeletionCase, FolderDeletionCheck
 from vuechoixgarde.bootstrap import create_runtime
+from vuechoixgarde.core.slots import Slot, SlotMode
 from vuechoixgarde.ui.main_window import MainWindow
+from vuechoixgarde.ui.texts import set_language, text
 
 
 def _slot_key(
@@ -487,5 +489,209 @@ def test_image_list_dock_starts_collapsed_toggles_and_keeps_arrow_navigation(
         timeout=5000,
     )
 
+    window.close()
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
+
+
+def test_ctrl_z_restores_move_and_updates_ui_without_playing_sound(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_language("en")
+    source = tmp_path / "source"
+    source.mkdir()
+    Image.new("RGB", (12, 8), "red").save(source / "IMG_1.png")
+    Image.new("RGB", (12, 8), "blue").save(source / "IMG_2.png")
+    runtime = create_runtime(tmp_path / "app-data")
+    runtime.service.save_preferences(
+        reopen_last_folder=False,
+        sort_direction="asc",
+        sound_enabled=True,
+        global_slot_template=(Slot("KeyZ", "trash", "#FF7B7B", SlotMode.MOVE),),
+    )
+    window = MainWindow(runtime)
+    qtbot.addWidget(window)
+    played: list[bool] = []
+    monkeypatch.setattr(window.sound_player, "play_added", lambda: played.append(True))
+    window.show()
+    window._open_folder(source)
+    qtbot.waitUntil(
+        lambda: window.view is not None and window.view.snapshot.current_name == "IMG_1.png",
+        timeout=5000,
+    )
+
+    window._slot_pressed(0, "IMG_1.png")
+    qtbot.waitUntil(
+        lambda: (
+            window.view is not None
+            and window.view.snapshot.current_name == "IMG_2.png"
+            and not window._slot_operation_pending
+        ),
+        timeout=8000,
+    )
+    assert played == [True]
+    window.image_view.zoom_by(1.25)
+
+    QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+
+    qtbot.waitUntil(
+        lambda: (
+            window.view is not None
+            and window.view.snapshot.current_name == "IMG_1.png"
+            and not window._slot_operation_pending
+        ),
+        timeout=8000,
+    )
+    assert window.view.snapshot.image_index == 1
+    assert window.view.snapshot.image_count == 2
+    assert window.progress_text.text() == "1 of 2"
+    assert window.filename_label.toolTip() == "IMG_1.png"
+    assert window.image_list.image_model.rowCount() == 2
+    assert (source / "IMG_1.png").exists()
+    assert not (source / "trash" / "IMG_1.png").exists()
+    assert window.image_view.zoom_state.scale == 1.0
+    assert window.image_view.zoom_state.offset == (0.0, 0.0)
+    assert window.statusBar().currentMessage() == text("undo_success", name="IMG_1.png")
+    assert played == [True]
+    assert QApplication.activeModalWidget() is None
+    window.close()
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
+
+
+def test_ctrl_z_conflict_shows_error_and_preserves_both_files(
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    image = source / "IMG_1.png"
+    Image.new("RGB", (12, 8), "green").save(image)
+    original_data = image.read_bytes()
+    runtime = create_runtime(tmp_path / "app-data")
+    runtime.service.save_preferences(
+        reopen_last_folder=False,
+        sort_direction="asc",
+        global_slot_template=(Slot("KeyZ", "trash", "#FF7B7B", SlotMode.MOVE),),
+    )
+    window = MainWindow(runtime)
+    qtbot.addWidget(window)
+    played: list[bool] = []
+    monkeypatch.setattr(window.sound_player, "play_added", lambda: played.append(True))
+    window.show()
+    window._open_folder(source)
+    qtbot.waitUntil(lambda: window.view is not None, timeout=5000)
+    window._slot_pressed(0, image.name)
+    qtbot.waitUntil(
+        lambda: (
+            window.view is not None
+            and window.view.snapshot.current_name is None
+            and not window._slot_operation_pending
+        ),
+        timeout=8000,
+    )
+    destination = source / "trash" / image.name
+    image.write_bytes(b"conflicting-original")
+    errors: list[str] = []
+
+    def dismiss_error() -> None:
+        dialog = QApplication.activeModalWidget()
+        if isinstance(dialog, QMessageBox):
+            errors.append(dialog.informativeText())
+            dialog.accept()
+
+    timer = QTimer(window)
+    timer.setInterval(10)
+    timer.timeout.connect(dismiss_error)
+    timer.start()
+    QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    qtbot.waitUntil(lambda: bool(errors), timeout=5000)
+    timer.stop()
+
+    assert errors[0]
+    assert image.read_bytes() == b"conflicting-original"
+    assert destination.read_bytes() == original_data
+    assert played == [True]
+    window.close()
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
+
+
+@pytest.mark.parametrize(
+    ("image_names", "moved_name", "expected_names", "expected_current", "expected_progress"),
+    (
+        (
+            ("IMG_1.png", "IMG_2.png", "IMG_3.png"),
+            "IMG_2.png",
+            ("IMG_1.png", "IMG_3.png"),
+            "IMG_3.png",
+            "2 of 2",
+        ),
+        (("IMG_1.png", "IMG_2.png"), "IMG_2.png", ("IMG_1.png",), "IMG_1.png", "1 of 1"),
+        (("IMG_1.png",), "IMG_1.png", (), None, "0 of 0"),
+    ),
+)
+def test_move_slot_removes_image_and_refreshes_session_ui(
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch,
+    image_names: tuple[str, ...],
+    moved_name: str,
+    expected_names: tuple[str, ...],
+    expected_current: str | None,
+    expected_progress: str,
+) -> None:
+    set_language("en")
+    source = tmp_path / "source"
+    source.mkdir()
+    for index, name in enumerate(image_names):
+        Image.new("RGB", (12, 8), (index * 40, 80, 120)).save(source / name)
+    runtime = create_runtime(tmp_path / "app-data")
+    runtime.service.save_preferences(
+        reopen_last_folder=False,
+        sort_direction="asc",
+        sound_enabled=True,
+        global_slot_template=(Slot("KeyW", "trash", "#FF7B7B", SlotMode.MOVE),),
+    )
+    window = MainWindow(runtime)
+    qtbot.addWidget(window)
+    played: list[bool] = []
+    monkeypatch.setattr(window.sound_player, "play_added", lambda: played.append(True))
+    window.show()
+    window._open_folder(source)
+    qtbot.waitUntil(lambda: window.view is not None, timeout=5000)
+    qtbot.waitUntil(
+        lambda: window.image_list.image_model.rowCount() == len(image_names), timeout=5000
+    )
+
+    window._navigate_to_image(image_names.index(moved_name))
+    qtbot.waitUntil(
+        lambda: window.view is not None and window.view.snapshot.current_name == moved_name,
+        timeout=5000,
+    )
+    QApplication.sendEvent(window, _slot_key())
+
+    qtbot.waitUntil(
+        lambda: (
+            window.view is not None
+            and window.view.snapshot.image_count == len(expected_names)
+            and not window._slot_operation_pending
+        ),
+        timeout=8000,
+    )
+
+    assert window.view is not None
+    assert set(window.view.snapshot.scan.images) == set(expected_names)
+    assert window.view.snapshot.current_name == expected_current
+    listed_names = tuple(
+        window.image_list.image_model.data(window.image_list.image_model.index(index, 0))
+        for index in range(window.image_list.image_model.rowCount())
+    )
+    assert listed_names == expected_names
+    assert window.image_list.image_model.rowCount() == len(expected_names)
+    assert window.progress_text.text() == expected_progress
+    assert window.filename_label.toolTip() == (expected_current or "")
+    assert (source / moved_name).exists() is False
+    assert (source / "trash" / moved_name).exists()
+    assert QApplication.activeModalWidget() is None
+    assert played == [True]
+    assert window.statusBar().currentMessage() == text("move_success", key="W", name="trash")
+    assert "#FF7B7B" in window.statusBar().styleSheet()
     window.close()
     qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)

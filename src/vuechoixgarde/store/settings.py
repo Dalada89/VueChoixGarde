@@ -5,13 +5,15 @@ import json
 import os
 import re
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
+from vuechoixgarde.core.comparison import comparison_key
 from vuechoixgarde.core.folder_names import validate_folder_name
 from vuechoixgarde.core.keys import ALLOWED_SLOT_CODES
 from vuechoixgarde.core.language import default_language
-from vuechoixgarde.core.slots import DEFAULT_SLOTS, Slot, validate_slot_profile
+from vuechoixgarde.core.slots import DEFAULT_SLOTS, Slot, SlotMode, validate_slot_profile
 from vuechoixgarde.ports.clock import Clock
 from vuechoixgarde.ports.errors import SettingsErrorReason, SettingsStoreError
 from vuechoixgarde.ports.models import LoadStatus, Settings, SettingsLoadResult
@@ -19,6 +21,7 @@ from vuechoixgarde.store.damage import quarantine_damaged
 from vuechoixgarde.store.paths import prepare_application_data
 
 _COLOR_PATTERN = re.compile(r"#[0-9a-fA-F]{6}")
+_SETTINGS_SCHEMA_VERSION = 2
 _SETTINGS_FIELDS = frozenset(
     {
         "schema_version",
@@ -45,7 +48,7 @@ class JsonSettingsStore:
     def defaults(self, locale_name: str | None = None) -> Settings:
         """Build validated first-run defaults for the supplied operating-system locale."""
         return Settings(
-            schema_version=1,
+            schema_version=_SETTINGS_SCHEMA_VERSION,
             language=default_language(locale_name),
             sound_enabled=True,
             sort_direction="asc",
@@ -84,7 +87,34 @@ class JsonSettingsStore:
             return SettingsLoadResult(
                 LoadStatus.DAMAGED, reason=SettingsErrorReason.INVALID_SETTINGS, detail=str(error)
             )
+        if settings.schema_version == 1:
+            settings = self._migrate_legacy_settings(settings)
+            try:
+                self.save(settings)
+            except SettingsStoreError as error:
+                return SettingsLoadResult(
+                    LoadStatus.DAMAGED, reason=SettingsErrorReason.IO_ERROR, detail=str(error)
+                )
         return SettingsLoadResult(LoadStatus.LOADED, settings)
+
+    @staticmethod
+    def _migrate_legacy_settings(settings: Settings) -> Settings:
+        slots = settings.global_slot_template
+        key_is_free = all(slot.key_position != "KeyR" for slot in slots)
+        name_is_free = all(
+            slot.destination_name is None
+            or comparison_key(slot.destination_name) != comparison_key("trash")
+            for slot in slots
+        )
+        if len(slots) < 12 and key_is_free and name_is_free:
+            slots += (DEFAULT_SLOTS[-1],)
+        migrated = replace(
+            settings,
+            schema_version=_SETTINGS_SCHEMA_VERSION,
+            global_slot_template=slots,
+        )
+        JsonSettingsStore.validate_settings(migrated)
+        return migrated
 
     def reset_damaged(self) -> Path | None:
         """Quarantine a damaged settings file and persist fresh defaults."""
@@ -102,6 +132,10 @@ class JsonSettingsStore:
     def save(self, settings: Settings) -> None:
         """Validate and atomically persist settings with a same-directory fsynced temp file."""
         self.validate_settings(settings)
+        if settings.schema_version != _SETTINGS_SCHEMA_VERSION:
+            raise SettingsStoreError(
+                SettingsErrorReason.INVALID_SETTINGS, detail="cannot save legacy settings schema"
+            )
         payload = {
             "schema_version": settings.schema_version,
             "language": settings.language,
@@ -114,6 +148,7 @@ class JsonSettingsStore:
                     "key_position": slot.key_position,
                     "destination_name": slot.destination_name,
                     "color": slot.color,
+                    "mode": slot.mode.value,
                 }
                 for slot in settings.global_slot_template
             ],
@@ -144,8 +179,8 @@ class JsonSettingsStore:
             raise ValueError("settings object has missing or unknown fields")
         data = cast(dict[str, object], value)
         schema_version = data["schema_version"]
-        if type(schema_version) is not int or schema_version != 1:
-            raise ValueError("schema_version must be integer 1")
+        if type(schema_version) is not int or schema_version not in {1, _SETTINGS_SCHEMA_VERSION}:
+            raise ValueError("unsupported settings schema_version")
         language = data["language"]
         if not isinstance(language, str) or language not in {"de", "en", "fr"}:
             raise ValueError("language must be de, en, or fr")
@@ -166,11 +201,10 @@ class JsonSettingsStore:
             raise ValueError("global_slot_template must be a list")
         slots: list[Slot] = []
         for raw_slot in raw_slots:
-            if not isinstance(raw_slot, dict) or set(raw_slot) != {
-                "key_position",
-                "destination_name",
-                "color",
-            }:
+            expected_slot_fields = {"key_position", "destination_name", "color"}
+            if schema_version == _SETTINGS_SCHEMA_VERSION:
+                expected_slot_fields.add("mode")
+            if not isinstance(raw_slot, dict) or set(raw_slot) != expected_slot_fields:
                 raise ValueError("slot has missing or unknown fields")
             slot_data = cast(dict[str, object], raw_slot)
             key_position = slot_data["key_position"]
@@ -182,7 +216,16 @@ class JsonSettingsStore:
                 raise ValueError("slot destination_name must be a string or null")
             if not isinstance(color, str) or _COLOR_PATTERN.fullmatch(color) is None:
                 raise ValueError("slot color must match #RRGGBB")
-            slots.append(Slot(key_position, destination_name, color))
+            mode = SlotMode.COPY
+            if schema_version == _SETTINGS_SCHEMA_VERSION:
+                raw_mode = slot_data["mode"]
+                if not isinstance(raw_mode, str):
+                    raise ValueError("slot mode must be a string")
+                try:
+                    mode = SlotMode(raw_mode)
+                except ValueError as error:
+                    raise ValueError("slot mode must be copy or move") from error
+            slots.append(Slot(key_position, destination_name, color, mode))
         issues = validate_slot_profile(slots)
         if issues:
             raise ValueError(f"invalid slot profile: {issues!r}")
@@ -197,7 +240,7 @@ class JsonSettingsStore:
                 raise ValueError("learned labels must be strings of length 1")
             learned.append((position, label))
         settings = Settings(
-            schema_version=1,
+            schema_version=schema_version,
             language=language,
             sound_enabled=sound_enabled,
             sort_direction=sort_direction,
@@ -211,9 +254,12 @@ class JsonSettingsStore:
 
     @staticmethod
     def validate_settings(settings: Settings) -> None:
-        if type(settings.schema_version) is not int or settings.schema_version != 1:
+        if type(settings.schema_version) is not int or settings.schema_version not in {
+            1,
+            _SETTINGS_SCHEMA_VERSION,
+        }:
             raise SettingsStoreError(
-                SettingsErrorReason.INVALID_SETTINGS, detail="schema_version must be 1"
+                SettingsErrorReason.INVALID_SETTINGS, detail="unsupported settings schema_version"
             )
         if not isinstance(settings.language, str) or settings.language not in {"de", "en", "fr"}:
             raise SettingsStoreError(

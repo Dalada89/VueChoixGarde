@@ -9,6 +9,7 @@ from vuechoixgarde.ports.models import (
     CopyRecord,
     FolderRenameRecord,
     OperationFileRecord,
+    OperationKind,
     OperationRecord,
     ProfileRecord,
     StateLoadResult,
@@ -104,6 +105,10 @@ class StateStore(Protocol):
         """Reassign a profile and register paths transactionally (FR-042)."""
         ...
 
+    def has_managed_copies(self, profile_id: str, destination_folder: str) -> bool:
+        """Return whether a destination folder has registered managed copies."""
+        ...
+
     def copy_records(
         self,
         profile_id: str,
@@ -125,6 +130,9 @@ class StateStore(Protocol):
         profile_id: str,
         destination_name: str,
         files: Sequence[OperationFileRecord],
+        *,
+        kind: OperationKind = OperationKind.COPY,
+        source_folder: str | None = None,
     ) -> OperationRecord:
         """Commit the journal header and all file rows before file creation (FR-046)."""
         ...

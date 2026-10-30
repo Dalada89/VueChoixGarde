@@ -23,7 +23,9 @@ def test_damaged_sqlite_is_kept_unchanged_and_folder_opens_view_only(tmp_path: P
 
     assert not runtime.register_available
     assert view.snapshot.current_name == "one.png"
-    assert all(slot.destination_name is None for slot in view.snapshot.profile.slots)
+    stored_settings = settings.load().settings
+    assert stored_settings is not None
+    assert view.snapshot.profile.slots == stored_settings.global_slot_template
     assert state_path.read_bytes() == damaged_bytes
     runtime.shutdown()
     assert state_path.read_bytes() == damaged_bytes
@@ -34,8 +36,9 @@ def test_accepting_only_damaged_sqlite_keeps_settings_and_quarantines_database(
 ) -> None:
     data_dir = tmp_path / "app-data"
     settings_store = JsonSettingsStore(data_dir, SystemClock())
-    original_settings = settings_store.defaults()
-    settings_store.save(original_settings)
+    settings_store.save(settings_store.defaults())
+    original_settings = settings_store.load().settings
+    assert original_settings is not None
     state_path = data_dir / "state.sqlite3"
     damaged_bytes = b"corrupted sqlite bytes"
     state_path.write_bytes(damaged_bytes)

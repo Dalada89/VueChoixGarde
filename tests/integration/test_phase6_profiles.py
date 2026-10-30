@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from vuechoixgarde.bootstrap import create_runtime
-from vuechoixgarde.core.slots import DEFAULT_SLOTS, Slot
+from vuechoixgarde.core.slots import DEFAULT_SLOTS, Slot, SlotMode
 from vuechoixgarde.core.temp_names import temp_file_name
 from vuechoixgarde.ports.models import CopyRecord, OperationFileRecord
 from vuechoixgarde.store.state import SQLiteStateStore
@@ -60,6 +60,17 @@ def test_profile_slots_and_global_template_remain_independent(tmp_path: Path) ->
         assert second_view.snapshot.profile.id != original_profile_id
     finally:
         runtime.shutdown()
+
+
+def test_profile_slots_roundtrip_move_mode_in_sqlite(tmp_path: Path, fixed_clock) -> None:
+    store = SQLiteStateStore(tmp_path / "app", fixed_clock)
+    assert store.load().register_available
+    move_slots = (Slot("KeyR", "trash", "#FF7B7B", SlotMode.MOVE),)
+
+    profile = store.create_profile_from_template("/source", "/source", move_slots)
+
+    assert profile.slots == move_slots
+    assert store.get_profile_by_identity("/source") == profile
 
 
 def test_orphan_reassignment_replaces_only_empty_target_and_rewrites_register(

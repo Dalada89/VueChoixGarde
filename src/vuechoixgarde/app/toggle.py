@@ -9,6 +9,7 @@ from vuechoixgarde.app.results import FileClassification, UseCaseStatus
 from vuechoixgarde.core.comparison import comparison_key
 from vuechoixgarde.core.destination import destination_folder_key
 from vuechoixgarde.core.sidecars import sidecars_for_image
+from vuechoixgarde.core.slots import SlotMode
 from vuechoixgarde.core.temp_names import temp_file_name
 from vuechoixgarde.core.toggle import (
     FileClass,
@@ -26,6 +27,7 @@ from vuechoixgarde.ports.models import (
     CopyRecord,
     DestinationStatus,
     OperationFileRecord,
+    OperationKind,
     ProfileRecord,
 )
 from vuechoixgarde.ports.state import StateStore
@@ -249,6 +251,8 @@ def execute_toggle(
             )
         if fresh.action in {ToggleAction.TOGGLE_OFF, ToggleAction.TOGGLE_OFF_CONFIRM}:
             return _toggle_off(fresh, filesystem, state, confirmed_modified, logger)
+        if profile.slots[fresh.slot_index].mode is SlotMode.MOVE:
+            return _toggle_move(fresh, filesystem, state, logger)
         return _toggle_on(fresh, filesystem, state, clock, logger)
     finally:
         gate.release()
@@ -400,6 +404,192 @@ def _shared_by_another_selected_image(
         if metadata is not None:
             return True
     return False
+
+
+def _toggle_move(
+    plan: TogglePlan,
+    filesystem: FileSystemPort,
+    state: StateStore,
+    logger: EventLogger | None,
+) -> ToggleResult:
+    destination = plan.destination_folder
+    try:
+        if destination is None:
+            destination = filesystem.create_destination_folder(
+                plan.source_root, plan.destination_name or ""
+            )
+        operation_targets = [plan.targets[0]] + [
+            target
+            for target in plan.targets[1:]
+            if target.classification.file_class is FileClass.ABSENT
+        ]
+        source_fingerprints = {
+            target.source_name: filesystem.fingerprint_file(
+                plan.source_root, plan.source_root / target.source_name
+            )
+            for target in operation_targets
+        }
+        shared_names = {
+            target.source_name
+            for target in operation_targets[1:]
+            if any(
+                image_name != plan.image_name
+                and target.source_name in sidecars_for_image(image_name, plan.source_sidecars)
+                for image_name in plan.source_images
+            )
+        }
+        operation_id = uuid4().hex
+        operation_files = tuple(
+            OperationFileRecord(
+                index,
+                temp_file_name(operation_id, index),
+                target.source_name,
+                source_fingerprints[target.source_name].size,
+                source_fingerprints[target.source_name].sha256,
+                moves_source=target.source_name not in shared_names,
+            )
+            for index, target in enumerate(operation_targets)
+        )
+        state.start_operation(
+            operation_id,
+            plan.profile_id,
+            plan.destination_name or "",
+            operation_files,
+            kind=OperationKind.MOVE,
+            source_folder=str(plan.source_root),
+        )
+        move_names = tuple(item.final_name for item in operation_files if item.moves_source)
+        finalized_moves = False
+        try:
+            for item in operation_files:
+                if item.moves_source:
+                    continue
+                expected = source_fingerprints[item.final_name]
+                copied = filesystem.copy_to_temp(
+                    plan.source_root, destination, item.final_name, item.temp_name
+                )
+                if (copied.size, copied.sha256) != (expected.size, expected.sha256):
+                    raise FileSystemError(
+                        FileSystemErrorReason.FILE_CHANGED,
+                        path=plan.source_root / item.final_name,
+                        detail="source changed during shared-sidecar copy",
+                    )
+                filesystem.finalize_temp_file(
+                    plan.source_root, destination, item.temp_name, item.final_name
+                )
+            filesystem.move_file_group(plan.source_root, destination, move_names)
+            finalized_moves = True
+            for item in operation_files:
+                if item.moves_source:
+                    moved = filesystem.fingerprint_file(
+                        plan.source_root, destination / item.final_name
+                    )
+                    expected = source_fingerprints[item.final_name]
+                    if (moved.size, moved.sha256) != (expected.size, expected.sha256):
+                        raise FileSystemError(
+                            FileSystemErrorReason.FILE_CHANGED,
+                            path=destination / item.final_name,
+                        )
+            state.complete_operation(operation_id, ())
+            _safe_log(
+                logger,
+                LogLevel.INFO,
+                LogEvent.COPY,
+                "files moved",
+                operation_kind=OperationKind.MOVE.value,
+                count=len(operation_files),
+            )
+            return ToggleResult(
+                UseCaseStatus.OK,
+                ToggleAction.TOGGLE_ON,
+                tuple(item.final_name for item in operation_files),
+            )
+        except Exception as error:
+            cleanup_ok = True
+            if finalized_moves:
+                try:
+                    fingerprints = tuple(source_fingerprints[name] for name in move_names)
+                    filesystem.undo_move_file_group(
+                        plan.source_root, destination, move_names, (), fingerprints
+                    )
+                except Exception:
+                    cleanup_ok = False
+            try:
+                present = set(filesystem.list_destination_names(plan.source_root, destination))
+            except Exception:
+                present = set()
+                cleanup_ok = False
+            for item in operation_files:
+                if item.temp_name in present:
+                    try:
+                        filesystem.delete_own_temp_file(
+                            plan.source_root, destination, item.temp_name
+                        )
+                    except Exception:
+                        cleanup_ok = False
+                if not item.moves_source and item.final_name in present:
+                    try:
+                        expected = source_fingerprints[item.final_name]
+                        filesystem.delete_verified_file(
+                            plan.source_root,
+                            destination,
+                            item.final_name,
+                            expected.size,
+                            expected.sha256,
+                        )
+                    except Exception:
+                        cleanup_ok = False
+            if cleanup_ok:
+                try:
+                    source_names = set(
+                        filesystem.list_destination_names(plan.source_root, plan.source_root)
+                    )
+                    present = set(filesystem.list_destination_names(plan.source_root, destination))
+                    for name in move_names:
+                        if name not in source_names or name in present:
+                            cleanup_ok = False
+                            break
+                        fingerprint = filesystem.fingerprint_file(
+                            plan.source_root, plan.source_root / name
+                        )
+                        expected = source_fingerprints[name]
+                        if (fingerprint.size, fingerprint.sha256) != (
+                            expected.size,
+                            expected.sha256,
+                        ):
+                            cleanup_ok = False
+                            break
+                except Exception:
+                    cleanup_ok = False
+            if cleanup_ok:
+                try:
+                    state.mark_rolled_back(operation_id)
+                except Exception:
+                    cleanup_ok = False
+            _safe_log(
+                logger,
+                LogLevel.ERROR,
+                LogEvent.ROLLBACK,
+                "toggle move failed",
+                reason=_reason(error),
+                cleanup_complete=cleanup_ok,
+            )
+            return ToggleResult(
+                UseCaseStatus.ERROR,
+                ToggleAction.TOGGLE_ON,
+                error_reason=_reason(error),
+            )
+    except Exception as error:
+        _safe_log(
+            logger,
+            LogLevel.ERROR,
+            LogEvent.ERROR,
+            "toggle move setup failed",
+            reason=_reason(error),
+        )
+        return ToggleResult(
+            UseCaseStatus.ERROR, ToggleAction.TOGGLE_ON, error_reason=_reason(error)
+        )
 
 
 def _toggle_on(

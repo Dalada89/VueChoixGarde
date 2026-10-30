@@ -9,3 +9,4 @@
 - Added journaled, no-replace destination-folder renaming with crash recovery and copy-register updates.
 - Added verified destination-folder deletion, foreign-entry detachment, stale-confirmation checks and multilingual UI prompts.
 - Moved settings saves to immutable UI-thread submissions so file workers never read Qt widgets.
+- Added Copy/Move slot modes, the R → `trash` Move default, RAW sidecar grouping, journaled Move recovery and session-only `Ctrl+Z` undo with localized feedback and help.

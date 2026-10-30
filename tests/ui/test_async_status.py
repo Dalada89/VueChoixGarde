@@ -9,6 +9,7 @@ from vuechoixgarde.app.results import SlotState
 from vuechoixgarde.app.service import SessionView, SlotStatusResult
 from vuechoixgarde.app.session import FolderSession
 from vuechoixgarde.bootstrap import create_runtime
+from vuechoixgarde.core.slots import Slot, SlotMode
 from vuechoixgarde.ui.main_window import MainWindow
 
 
@@ -74,5 +75,41 @@ def test_stale_slot_status_result_is_discarded(qtbot: QtBot, tmp_path: Path) -> 
 
     assert window.view is newer_view
     assert window.view.slot_states == view.slot_states
+    window.close()
+    qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)
+
+
+def test_slot_status_result_for_moved_image_cannot_replace_refreshed_view(
+    qtbot: QtBot, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    Image.new("RGB", (8, 8), "red").save(source / "one.png")
+    Image.new("RGB", (8, 8), "blue").save(source / "two.png")
+    runtime = create_runtime(tmp_path / "application-data")
+    runtime.service.save_preferences(
+        reopen_last_folder=False,
+        sort_direction="asc",
+        global_slot_template=(Slot("KeyW", "trash", "#FF7B7B", SlotMode.MOVE),),
+    )
+    old_view = runtime.service.open_folder(source)
+    window = MainWindow(runtime)
+    qtbot.addWidget(window)
+    window.view = old_view
+    stale = SlotStatusResult(
+        "one.png",
+        old_view.generation,
+        (SlotState.SELECTED,),
+        1,
+    )
+    plan = runtime.service.plan_slot("one.png", 0)
+
+    _result, moved_view = runtime.service.execute_plan(plan, confirmed_modified=False)
+    window.view = moved_view
+    window._slot_status_finished((stale, None), None)
+
+    assert moved_view.snapshot.scan.images == ("two.png",)
+    assert moved_view.snapshot.current_name == "two.png"
+    assert window.view is moved_view
     window.close()
     qtbot.waitUntil(lambda: not window.isVisible(), timeout=5000)

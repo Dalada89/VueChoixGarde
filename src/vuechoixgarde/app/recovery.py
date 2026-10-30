@@ -10,6 +10,8 @@ from vuechoixgarde.ports.log import EventLogger, LogEvent, LogLevel
 from vuechoixgarde.ports.models import (
     DestinationStatus,
     FolderRenameRecord,
+    OperationKind,
+    OperationRecord,
 )
 from vuechoixgarde.ports.state import StateStore
 
@@ -198,6 +200,20 @@ def recover_operations(
             resolution = filesystem.resolve_destination_folder(
                 source_root, operation.destination_name
             )
+            if operation.kind is OperationKind.MOVE:
+                destination = (
+                    source_root / resolution.exact_name
+                    if resolution.status is DestinationStatus.FOUND
+                    and resolution.exact_name is not None
+                    else None
+                )
+                if resolution.status is DestinationStatus.FAULTY:
+                    pending.append(operation.id)
+                    continue
+                _recover_move_operation(operation, filesystem, source_root, destination)
+                state.mark_recovered(operation.id)
+                recovered.append(operation.id)
+                continue
             if resolution.status is DestinationStatus.NOT_FOUND:
                 state.mark_recovered(operation.id)
                 recovered.append(operation.id)
@@ -255,6 +271,87 @@ def recover_operations(
         error_count=len(errors),
     )
     return RecoveryReport(tuple(recovered), tuple(pending), tuple(errors))
+
+
+def _recover_move_operation(
+    operation: OperationRecord,
+    filesystem: FileSystemPort,
+    source_root: Path,
+    destination: Path | None,
+) -> None:
+    if operation.source_folder != str(source_root):
+        raise ValueError("move journal source does not match the active folder")
+
+    source_names = set(filesystem.list_destination_names(source_root, source_root))
+    destination_names = (
+        set(filesystem.list_destination_names(source_root, destination))
+        if destination is not None
+        else set()
+    )
+    for item in operation.files:
+        source_exists = item.final_name in source_names
+        destination_exists = item.final_name in destination_names
+        if item.moves_source:
+            if source_exists == destination_exists:
+                raise ValueError("move journal file is missing or present in both locations")
+            checked_path = (
+                source_root / item.final_name if source_exists else destination / item.final_name  # type: ignore[operator]
+            )
+        else:
+            if not source_exists:
+                raise ValueError("shared source file is missing")
+            checked_path = source_root / item.final_name
+
+        fingerprint = filesystem.fingerprint_file(source_root, checked_path)
+        if (fingerprint.size, fingerprint.sha256) != (
+            item.expected_size,
+            item.expected_sha256,
+        ):
+            raise ValueError("move journal file changed")
+        if not item.moves_source and destination_exists:
+            shared_fingerprint = filesystem.fingerprint_file(
+                source_root,
+                destination / item.final_name,  # type: ignore[operator]
+            )
+            if (shared_fingerprint.size, shared_fingerprint.sha256) != (
+                item.expected_size,
+                item.expected_sha256,
+            ):
+                raise ValueError("shared destination file changed")
+
+    if destination is not None:
+        for item in operation.files:
+            if item.temp_name in destination_names:
+                filesystem.delete_own_temp_file(source_root, destination, item.temp_name)
+
+        moved_items = tuple(
+            item
+            for item in operation.files
+            if item.moves_source
+            and item.final_name not in source_names
+            and item.final_name in destination_names
+        )
+        if moved_items:
+            fingerprints = tuple(
+                filesystem.fingerprint_file(source_root, destination / item.final_name)
+                for item in moved_items
+            )
+            filesystem.undo_move_file_group(
+                source_root,
+                destination,
+                tuple(item.final_name for item in moved_items),
+                (),
+                fingerprints,
+            )
+        for item in operation.files:
+            if not item.moves_source and item.final_name in destination_names:
+                filesystem.delete_verified_file(
+                    source_root,
+                    destination,
+                    item.final_name,
+                    item.expected_size,
+                    item.expected_sha256,
+                )
 
 
 def _safe_log(

@@ -147,6 +147,13 @@ class CopyRecord:
     created_at: str
 
 
+class OperationKind(StrEnum):
+    """File operation kind persisted in the crash-recovery journal."""
+
+    COPY = "copy"
+    MOVE = "move"
+
+
 @dataclass(frozen=True)
 class OperationFileRecord:
     """One journaled temp/final file and its expected content fingerprint."""
@@ -156,6 +163,7 @@ class OperationFileRecord:
     final_name: str
     expected_size: int
     expected_sha256: str
+    moves_source: bool = False
 
 
 class OperationState(StrEnum):
@@ -178,6 +186,8 @@ class OperationRecord:
     started_at: str
     updated_at: str
     files: tuple[OperationFileRecord, ...]
+    kind: OperationKind = OperationKind.COPY
+    source_folder: str | None = None
 
 
 class FolderRenameState(StrEnum):

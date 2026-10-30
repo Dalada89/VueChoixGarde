@@ -87,6 +87,27 @@ class FileSystemPort(Protocol):
         """Assign the final name without overwriting; conflict leaves the temp file intact."""
         ...
 
+    def move_file_group(
+        self,
+        source_root: Path,
+        destination_folder: Path,
+        move_names: tuple[str, ...],
+        copy_names: tuple[str, ...] = (),
+    ) -> tuple[FileFingerprint, ...]:
+        """Move a file group atomically, copying shared sidecars instead of moving them."""
+        ...
+
+    def undo_move_file_group(
+        self,
+        source_root: Path,
+        destination_folder: Path,
+        move_names: tuple[str, ...],
+        copy_names: tuple[str, ...],
+        fingerprints: tuple[FileFingerprint, ...],
+    ) -> None:
+        """Restore a moved group only when all files and original names are safe."""
+        ...
+
     def delete_verified_file(
         self,
         source_root: Path,

@@ -37,7 +37,7 @@ from vuechoixgarde.core.keys import (
     displayed_key_label,
     printable_key_label,
 )
-from vuechoixgarde.core.slots import ProfileError, Slot, validate_slot_profile
+from vuechoixgarde.core.slots import ProfileError, Slot, SlotMode, validate_slot_profile
 from vuechoixgarde.ports.models import ProfileRecord, Settings
 from vuechoixgarde.ui.keyboard import keyboard_event_data
 from vuechoixgarde.ui.style import contrast_ratio
@@ -132,6 +132,7 @@ class _SlotEditor(QWidget):
         self.row_origins: dict[QLineEdit, str | None] = {}
         self.delete_controls: list[tuple[QLineEdit, QPushButton, str | None]] = []
         self.rows: list[tuple[_KeyCaptureButton, QLineEdit, QPushButton, QLabel]] = []
+        self.mode_controls: list[QComboBox] = []
         self.row_layout = QVBoxLayout()
         self.rows_host = QWidget()
         self.rows_host.setLayout(self.row_layout)
@@ -159,8 +160,13 @@ class _SlotEditor(QWidget):
 
     def slots(self) -> tuple[Slot, ...]:
         return tuple(
-            Slot(key.position, name.text() or None, str(color.property("slotColor")))
-            for key, name, color, _ in self.rows
+            Slot(
+                key.position,
+                name.text() or None,
+                str(color.property("slotColor")),
+                SlotMode(str(mode.currentData())),
+            )
+            for (key, name, color, _), mode in zip(self.rows, self.mode_controls, strict=True)
         )
 
     def renames(self) -> tuple[FolderRename, ...]:
@@ -182,6 +188,8 @@ class _SlotEditor(QWidget):
             key.setEnabled(not value)
             name.setReadOnly(value)
             color.setEnabled(not value)
+        for mode in self.mode_controls:
+            mode.setEnabled(not value)
         self._update_delete_controls()
 
     def set_busy(self, value: bool) -> None:
@@ -210,6 +218,8 @@ class _SlotEditor(QWidget):
             return
         row = self.rows.pop()
         removed_name = row[1]
+        removed_mode = self.mode_controls.pop()
+        removed_mode.deleteLater()
         for widget in row:
             widget.deleteLater()
         for name, button, _origin in self.delete_controls:
@@ -227,6 +237,12 @@ class _SlotEditor(QWidget):
         row.setContentsMargins(4, 3, 4, 3)
         key = _KeyCaptureButton(slot.key_position, self.labels, row_widget)
         key.setObjectName("keyCaptureButton")
+        mode = QComboBox(row_widget)
+        mode.setObjectName("slotModeCombo")
+        mode.setAccessibleName(text("slot_mode"))
+        mode.addItem(text("slot_mode_copy"), SlotMode.COPY.value)
+        mode.addItem(text("slot_mode_move"), SlotMode.MOVE.value)
+        mode.setCurrentIndex(mode.findData(slot.mode.value))
         name = QLineEdit(slot.destination_name or "", row_widget)
         name.setPlaceholderText(text("destination_name"))
         color = QPushButton(text("choose_color"), row_widget)
@@ -247,6 +263,7 @@ class _SlotEditor(QWidget):
         errors = QLabel()
         errors.setObjectName("validationMessage")
         row.addWidget(key)
+        row.addWidget(mode)
         row.addWidget(name, 1)
         row.addWidget(color)
         row.addWidget(sample)
@@ -265,6 +282,7 @@ class _SlotEditor(QWidget):
             self.delete_controls.append((name, delete_button, origin_name))
         self.row_layout.addWidget(row_widget)
         self.rows.append((key, name, color, errors))
+        self.mode_controls.append(mode)
         self.row_origins[name] = origin_name
         name.textChanged.connect(self._update_validation)
         key.clicked.connect(self._update_validation)

@@ -7,9 +7,11 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from fakes import FaultInjectingFileSystem
 from PIL import Image
 
 import vuechoixgarde.fsops.filesystem as filesystem
+from vuechoixgarde.core.sidecars import sidecars_for_image
 from vuechoixgarde.core.temp_names import temp_file_name
 from vuechoixgarde.fsops.filesystem import LocalFileSystem
 from vuechoixgarde.fsops.lock import LocalFolderLock
@@ -398,6 +400,145 @@ def test_delete_modified_copy_requires_contained_regular_file(source_guard) -> N
     with pytest.raises(FileSystemError) as caught:
         LocalFileSystem.delete_modified_copy(root, destination, "nested")
     assert caught.value.reason is FileSystemErrorReason.DELETE_REFUSED
+
+
+def _snapshot_files(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()
+    }
+
+
+def test_move_file_group_moves_image_and_unique_sidecar(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    image = root / "photo.jpg"
+    sidecar = root / "photo.xmp"
+    image.write_bytes(b"image bytes")
+    sidecar.write_bytes(b"metadata bytes")
+    destination = root / "Best"
+    destination.mkdir()
+
+    fingerprints = LocalFileSystem().move_file_group(root, destination, (image.name, sidecar.name))
+
+    assert len(fingerprints) == 2
+    assert not image.exists()
+    assert not sidecar.exists()
+    assert (destination / image.name).read_bytes() == b"image bytes"
+    assert (destination / sidecar.name).read_bytes() == b"metadata bytes"
+
+
+def test_shared_sidecar_is_copied_and_removed_from_destination_on_undo(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    image = root / "photo.jpg"
+    other_image = root / "photo.png"
+    shared_sidecar = root / "photo.xmp"
+    image.write_bytes(b"image bytes")
+    other_image.write_bytes(b"other image")
+    shared_sidecar.write_bytes(b"shared metadata")
+    destination = root / "Best"
+    destination.mkdir()
+    filenames = tuple(path.name for path in root.iterdir() if path.is_file())
+    shared = tuple(
+        set(sidecars_for_image(image.name, filenames))
+        & set(sidecars_for_image(other_image.name, filenames))
+    )
+    assert shared == (shared_sidecar.name,)
+    filesystem = LocalFileSystem()
+
+    fingerprints = filesystem.move_file_group(root, destination, (image.name,), shared)
+
+    assert not image.exists()
+    assert other_image.read_bytes() == b"other image"
+    assert shared_sidecar.read_bytes() == b"shared metadata"
+    assert (destination / image.name).read_bytes() == b"image bytes"
+    assert (destination / shared_sidecar.name).read_bytes() == b"shared metadata"
+
+    filesystem.undo_move_file_group(root, destination, (image.name,), shared, fingerprints)
+
+    assert image.read_bytes() == b"image bytes"
+    assert shared_sidecar.read_bytes() == b"shared metadata"
+    assert not (destination / image.name).exists()
+    assert not (destination / shared_sidecar.name).exists()
+
+
+def test_move_group_conflict_preserves_source_and_occupant(source_guard) -> None:
+    root = source_guard.root
+    image = root / "photo.jpg"
+    sidecar = root / "photo.xmp"
+    image.write_bytes(b"image bytes")
+    sidecar.write_bytes(b"metadata bytes")
+    destination = LocalFileSystem.create_destination_folder(root, "Best")
+    occupant = destination / sidecar.name
+    occupant.write_bytes(b"foreign occupant")
+    source_guard.seal(allowed_destinations={"Best"})
+    before = _snapshot_files(root)
+
+    with pytest.raises(FileSystemError) as caught:
+        LocalFileSystem().move_file_group(root, destination, (image.name, sidecar.name))
+
+    assert caught.value.reason is FileSystemErrorReason.NAME_CONFLICT
+    assert _snapshot_files(root) == before
+
+
+def test_move_group_failure_midway_rolls_back_all_source_files(source_guard) -> None:
+    root = source_guard.root
+    image = root / "photo.jpg"
+    unique_sidecar = root / "photo.jpg.xmp"
+    shared_sidecar = root / "photo.xmp"
+    other_image = root / "photo.png"
+    image.write_bytes(b"image bytes")
+    unique_sidecar.write_bytes(b"unique metadata")
+    shared_sidecar.write_bytes(b"shared metadata")
+    other_image.write_bytes(b"other image")
+    destination = LocalFileSystem.create_destination_folder(root, "Best")
+    source_guard.seal(allowed_destinations={"Best"})
+    before = _snapshot_files(root)
+    filesystem = FaultInjectingFileSystem()
+    filesystem.fail_move_at = 2
+
+    with pytest.raises(FileSystemError) as caught:
+        filesystem.move_file_group(
+            root, destination, (image.name, unique_sidecar.name), (shared_sidecar.name,)
+        )
+
+    assert caught.value.reason is FileSystemErrorReason.IO_ERROR
+    assert _snapshot_files(root) == before
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_reason"),
+    [
+        ("occupied", FileSystemErrorReason.NAME_CONFLICT),
+        ("missing", FileSystemErrorReason.DELETE_REFUSED),
+        ("changed", FileSystemErrorReason.FILE_CHANGED),
+    ],
+)
+def test_undo_move_rejects_conflict_missing_or_changed_file_without_mutation(
+    tmp_path: Path, failure: str, expected_reason: FileSystemErrorReason
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    image = root / "photo.jpg"
+    image.write_bytes(b"image bytes")
+    destination = root / "Best"
+    destination.mkdir()
+    filesystem = LocalFileSystem()
+    fingerprints = filesystem.move_file_group(root, destination, (image.name,))
+    moved = destination / image.name
+    if failure == "occupied":
+        image.write_bytes(b"foreign source occupant")
+    elif failure == "missing":
+        moved.unlink()
+    else:
+        moved.write_bytes(b"changed image bytes")
+    before = _snapshot_files(root)
+
+    with pytest.raises(FileSystemError) as caught:
+        filesystem.undo_move_file_group(root, destination, (image.name,), (), fingerprints)
+
+    assert caught.value.reason is expected_reason
+    assert _snapshot_files(root) == before
 
 
 def test_folder_lock_conflicts_across_process_and_releases(tmp_path: Path) -> None:

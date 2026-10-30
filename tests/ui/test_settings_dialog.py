@@ -7,7 +7,7 @@ from pytestqt.qtbot import QtBot
 
 from vuechoixgarde.app.results import FolderRename
 from vuechoixgarde.bootstrap import create_runtime
-from vuechoixgarde.core.slots import Slot
+from vuechoixgarde.core.slots import Slot, SlotMode
 from vuechoixgarde.ui.settings_dialog import SettingsDialog, SettingsSubmission
 
 
@@ -207,6 +207,21 @@ def test_submission_captures_profile_rename_and_delete_button_state(
     dialog.set_busy(False)
     name.setText("Saved")
     assert delete_button.isEnabled()
+    dialog.reject()
+    runtime.shutdown()
+
+
+def test_slot_mode_selector_is_saved(qtbot: QtBot, tmp_path: Path) -> None:
+    runtime, dialog = _dialog(tmp_path)
+    qtbot.addWidget(dialog)
+    captured: list[SettingsSubmission] = []
+    dialog.on_save = captured.append
+    mode = dialog.slot_editor.mode_controls[0]
+    mode.setCurrentIndex(mode.findData(SlotMode.MOVE.value))
+
+    dialog._save()
+
+    assert captured[0].global_slot_template[0].mode is SlotMode.MOVE
     dialog.reject()
     runtime.shutdown()
 

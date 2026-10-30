@@ -17,6 +17,15 @@ For every platform/session below:
 
 A valid position should be independent of the active layout. A blank or unexpected position, modifier misclassification, or label change on a dead key should be recorded as a failure rather than corrected by editing the mapping during the test.
 
+## Application MOVE and undo shortcuts
+
+Run these checks in VueChoixGarde with generated images in a disposable source folder; do not use personal files.
+
+1. Confirm the default profile exposes the R slot for `trash` in Move mode. Press its physical R position on a current image; verify the image leaves the source list, appears in the `trash` subfolder, and the app does not open or use the operating-system recycle bin.
+2. Press Ctrl+Z once. Verify the image returns to the sorted list and becomes current, with updated progress and no undo sound. Repeat after multiple moves to confirm last-in, first-out behavior.
+3. Confirm Ctrl+Z does nothing to source files when there is no move to undo. Change to another source folder or close the app after a move and confirm the prior session's undo is no longer available.
+4. Hold a slot key long enough to generate auto-repeat and confirm a move occurs only once. Test Ctrl+Z while a text field or modal dialog has focus and confirm the shortcut does not trigger a slot action.
+
 ## Results
 
 | Platform / session | Layout | Default positions correct (W/A/S/D) | Learned labels correct | ISO IntlBackslash / Backquote | Modifiers / AltGr blocked | Dead key retained prior label | Auto-repeat identified | Pass / notes |

@@ -58,6 +58,7 @@ from vuechoixgarde.core.comparison import comparison_key
 from vuechoixgarde.core.folder_names import FolderNameError, validate_folder_name
 from vuechoixgarde.core.keys import displayed_key_label, update_learned_key_labels
 from vuechoixgarde.core.navigation import NavigationDirection
+from vuechoixgarde.core.slots import SlotMode
 from vuechoixgarde.core.sorting import sort_names
 from vuechoixgarde.imaging.cache import DecodedImageCache
 from vuechoixgarde.imaging.size import full_resolution_decode_bounds, screen_decode_bounds
@@ -155,6 +156,9 @@ class MainWindow(QMainWindow):
         self.view: SessionView | None = None
         self._pending_operations = 0
         self._slot_operation_pending = False
+        self._slot_feedback_timer = QTimer(self)
+        self._slot_feedback_timer.setSingleShot(True)
+        self._slot_feedback_timer.timeout.connect(lambda: self.statusBar().setStyleSheet(""))
         self._slot_status_in_flight = False
         self._slot_status_requested: SessionView | None = None
         self._navigation_in_flight = False
@@ -444,6 +448,14 @@ class MainWindow(QMainWindow):
                 if error is not None:
                     dialog.set_busy(False)
                     if isinstance(error, FolderManagementError):
+                        if error.reason is FolderManagementReason.MODE_CHANGE_BLOCKED:
+                            dialog.set_message(
+                                text(
+                                    "slot_mode_change_blocked",
+                                    name=error.destination_name or "",
+                                )
+                            )
+                            return
                         reason_text = {
                             FolderManagementReason.NAME_OCCUPIED: "rename_name_occupied",
                             FolderManagementReason.INVALID_NAME: "rename_invalid_name",
@@ -1029,9 +1041,13 @@ class MainWindow(QMainWindow):
             key_name = "added" if was_added else "removed"
             if was_added and view.settings.sound_enabled:
                 self.sound_player.play_added()
+            message_key = "move_success" if was_added and slot.mode is SlotMode.MOVE else key_name
             self.statusBar().showMessage(
-                text(key_name, key=key, name=slot.destination_name or ""), 2200
+                text(message_key, key=key, name=slot.destination_name or ""), 2200
             )
+            if was_added and slot.mode is SlotMode.MOVE:
+                self.statusBar().setStyleSheet(f"color: {slot.color};")
+                self._slot_feedback_timer.start(2200)
         elif result.status is UseCaseStatus.BUSY:
             self.statusBar().showMessage(text("busy_slot"), 1200)
         else:
@@ -1052,6 +1068,12 @@ class MainWindow(QMainWindow):
             box.setDetailedText(details)
             box.exec()
         self._finish_slot_action()
+
+    def _handle_undo_result(self, view: SessionView, previous_image_count: int) -> None:
+        if view.snapshot.image_count > previous_image_count:
+            self.statusBar().showMessage(
+                text("undo_success", name=view.snapshot.current_name or ""), 2200
+            )
 
     def _ask_modified_confirmation(self, plan: TogglePlan, *, names: tuple[str, ...] = ()) -> None:
         affected = names or tuple(
@@ -1257,6 +1279,15 @@ class MainWindow(QMainWindow):
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if not main_window_key_filter_enabled():
             super().keyPressEvent(event)
+            return
+        if event.key() == Qt.Key.Key_Z and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            if self.view is not None:
+                previous_image_count = self.view.snapshot.image_count
+                self._run_file(
+                    self.runtime.service.undo_last_move,
+                    lambda view, _: self._handle_undo_result(view, previous_image_count),
+                )
+            event.accept()
             return
         if (
             event.key() in (Qt.Key.Key_Right, Qt.Key.Key_Left)

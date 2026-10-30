@@ -69,6 +69,21 @@ def test_modifier_keys_prevent_slot_activation(qtbot: QtBot, modifier: Qt.Keyboa
     assert not data.triggers_slot
 
 
+def test_control_z_is_not_a_slot_press_for_a_z_slot() -> None:
+    data = keyboard_event_from_raw(
+        native_scan_code=0x34,
+        native_virtual_key=0,
+        modifiers=Qt.KeyboardModifier.ControlModifier,
+        auto_repeat=False,
+        text="z",
+        platform=NativeKeyPlatform.LINUX,
+    )
+
+    assert data.position == "KeyZ"
+    assert data.modifier_active
+    assert not data.triggers_slot
+
+
 def test_keypad_modifier_does_not_count_as_a_modifier(qtbot: QtBot) -> None:
     qtbot.addWidget(QWidget())
     data = keyboard_event_data(

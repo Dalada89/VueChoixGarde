@@ -27,7 +27,8 @@ from vuechoixgarde.core.comparison import comparison_key
 from vuechoixgarde.core.destination import destination_folder_key
 from vuechoixgarde.core.folder_names import validate_folder_name
 from vuechoixgarde.core.navigation import NavigationDirection, change_sort_direction
-from vuechoixgarde.core.slots import DEFAULT_SLOTS, Slot, validate_slot_profile
+from vuechoixgarde.core.sidecars import sidecars_for_image
+from vuechoixgarde.core.slots import DEFAULT_SLOTS, Slot, SlotMode, validate_slot_profile
 from vuechoixgarde.core.toggle import FileClass, ToggleAction
 from vuechoixgarde.ports.clock import Clock
 from vuechoixgarde.ports.errors import FileSystemError, FileSystemErrorReason
@@ -84,6 +85,15 @@ class SlotStatusResult:
     image_slot_info: tuple[tuple[tuple[str, str], ...], ...] = ()
 
 
+@dataclass(frozen=True)
+class _MoveUndoEntry:
+    source_root: Path
+    destination_folder: Path
+    image_name: str
+    move_names: tuple[str, ...]
+    copy_names: tuple[str, ...]
+
+
 class SessionService:
     """Own a FolderSession; call every method only on the single file-operation worker."""
 
@@ -113,6 +123,7 @@ class SessionService:
         self.session: FolderSession | None = None
         self._view_generation = 0
         self.warning: str | None = None
+        self._move_undo_stack: list[_MoveUndoEntry] = []
 
     def open_folder(self, path: Path) -> SessionView:
         """Open and lock a folder, replacing the prior session only after success."""
@@ -130,6 +141,7 @@ class SessionService:
             logger=self.logger,
         )
         previous = self.session
+        self._move_undo_stack.clear()
         self.session = replacement
         if previous is not None:
             previous.close()
@@ -220,8 +232,74 @@ class SessionService:
         if result.status is UseCaseStatus.MODIFIED_CONFIRMATION_REQUIRED:
             session.reconcile(automatic=False)
         elif result.status is UseCaseStatus.OK and result.action is ToggleAction.TOGGLE_ON:
+            slot = session.profile.slots[plan.slot_index]
+            if slot.mode is SlotMode.MOVE:
+                self._remember_move_for_undo(session, plan, result)
+                return result, self.refresh()
             self._mark_new_copies_verified(session, plan, result)
         return result, self._view()
+
+    def undo_last_move(self) -> SessionView:
+        """Undo the newest MOVE in this folder session and focus the restored image."""
+        session = self._require_session()
+        if not self._move_undo_stack:
+            return self._view()
+        entry = self._move_undo_stack[-1]
+        if entry.source_root != session.source_path:
+            self._move_undo_stack.clear()
+            return self._view()
+        if not session.gate.try_acquire():
+            raise RuntimeError("another file operation is in progress")
+        try:
+            names = (*entry.move_names, *entry.copy_names)
+            fingerprints = tuple(
+                self.filesystem.fingerprint_file(entry.source_root, entry.destination_folder / name)
+                for name in names
+            )
+            self.filesystem.undo_move_file_group(
+                entry.source_root,
+                entry.destination_folder,
+                entry.move_names,
+                entry.copy_names,
+                fingerprints,
+            )
+            self._move_undo_stack.pop()
+            session.refresh()
+            if self.register_available and not session.recovery_pending:
+                session.reconcile(automatic=True, acquire_gate=False)
+            session.navigate_to(session.navigation.images.index(entry.image_name))
+        finally:
+            session.gate.release()
+        return self._view()
+
+    def _remember_move_for_undo(
+        self, session: FolderSession, plan: TogglePlan, result: ToggleResult
+    ) -> None:
+        if plan.destination_name is None:
+            return
+        shared_sidecar_names = {
+            comparison_key(sidecar_name)
+            for other_image in plan.source_images
+            if comparison_key(other_image) != comparison_key(plan.image_name)
+            for sidecar_name in sidecars_for_image(other_image, plan.source_sidecars)
+        }
+        copy_names = tuple(
+            name for name in result.changed_files if comparison_key(name) in shared_sidecar_names
+        )
+        move_names = tuple(
+            name
+            for name in result.changed_files
+            if comparison_key(name) not in shared_sidecar_names
+        )
+        self._move_undo_stack.append(
+            _MoveUndoEntry(
+                session.source_path,
+                plan.destination_folder or session.source_path / plan.destination_name,
+                plan.image_name,
+                move_names,
+                copy_names,
+            )
+        )
 
     def _mark_new_copies_verified(
         self, session: FolderSession, plan: TogglePlan, result: ToggleResult
@@ -336,6 +414,8 @@ class SessionService:
         image_name_by_key = {comparison_key(name): name for name in image_names}
         slots_by_image: dict[str, list[tuple[str, str]]] = {name: [] for name in image_names}
         for slot in session.profile.slots:
+            if slot.mode is not SlotMode.COPY:
+                continue
             destination_name = slot.destination_name
             if destination_name is None:
                 continue
@@ -368,8 +448,9 @@ class SessionService:
         if profile_slots is not None and validate_slot_profile(profile_slots):
             raise ValueError("profile slots are invalid")
         if profile_slots is not None:
-            self._require_session()
+            session = self._require_session()
             self._ensure_idle()
+            self._ensure_slot_mode_changes_unblocked(session.profile.slots, profile_slots)
 
         if renames:
             if profile_slots is None:
@@ -931,10 +1012,30 @@ class SessionService:
             session.settings = updated
         return updated
 
+    def _ensure_slot_mode_changes_unblocked(
+        self, current_slots: tuple[Slot, ...], requested_slots: tuple[Slot, ...]
+    ) -> None:
+        session = self._require_session()
+        for current, requested in zip(current_slots, requested_slots, strict=False):
+            if current.mode is requested.mode:
+                continue
+            for destination_name in dict.fromkeys(
+                (current.destination_name, requested.destination_name)
+            ):
+                if destination_name is None:
+                    continue
+                destination_folder = str(session.source_path / destination_name)
+                if self.state_store.has_managed_copies(session.profile.id, destination_folder):
+                    raise FolderManagementError(
+                        FolderManagementReason.MODE_CHANGE_BLOCKED,
+                        destination_name=destination_name,
+                    )
+
     def save_profile_slots(self, slots: tuple[Slot, ...]) -> SessionView:
         """Save profile slots atomically, then replace the live profile."""
         session = self._require_session()
         self._ensure_idle()
+        self._ensure_slot_mode_changes_unblocked(session.profile.slots, slots)
         session.profile = self.state_store.replace_profile_slots(session.profile.id, slots)
         self.warning = None
         return self._view()
@@ -1021,6 +1122,7 @@ class SessionService:
         return self.profile_catalog()
 
     def close(self) -> None:
+        self._move_undo_stack.clear()
         session, self.session = self.session, None
         if session is not None:
             session.close()

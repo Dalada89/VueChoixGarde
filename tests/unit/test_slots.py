@@ -23,11 +23,23 @@ def test_slot_count_limits(slots: tuple[Slot, ...], expected: ProfileError) -> N
     assert any(issue.error is expected for issue in validate_slot_profile(slots))
 
 
-def test_default_slots_have_unique_keys_distinct_colors_and_no_names() -> None:
-    assert [slot.key_position for slot in DEFAULT_SLOTS] == ["KeyW", "KeyA", "KeyS", "KeyD"]
-    assert len({slot.color for slot in DEFAULT_SLOTS}) == 4
-    assert all(slot.destination_name is None for slot in DEFAULT_SLOTS)
+def test_default_slots_have_unique_keys_colors_names_and_modes() -> None:
+    assert [slot.key_position for slot in DEFAULT_SLOTS] == ["KeyW", "KeyA", "KeyS", "KeyD", "KeyR"]
+    assert len({slot.color for slot in DEFAULT_SLOTS}) == 5
+    assert all(slot.destination_name is None for slot in DEFAULT_SLOTS[:4])
+    assert DEFAULT_SLOTS[0].color == "#CE93D8"
+    assert DEFAULT_SLOTS[4].destination_name == "trash"
+    assert [slot.mode for slot in DEFAULT_SLOTS] == ["copy", "copy", "copy", "copy", "move"]
+    assert DEFAULT_SLOTS[4].color == "#FF7B7B"
     assert validate_slot_profile(DEFAULT_SLOTS) == ()
+
+
+def test_slot_mode_defaults_to_copy_and_invalid_mode_is_rejected() -> None:
+    assert Slot("KeyW", None, "#000000").mode == "copy"
+    issues = validate_slot_profile((Slot("KeyW", None, "#000000", mode="archive"),))
+    assert len(issues) == 1
+    assert issues[0].error is ProfileError.INVALID_MODE
+    assert issues[0].slot_indexes == (0,)
 
 
 def test_twelve_slots_are_allowed() -> None:
