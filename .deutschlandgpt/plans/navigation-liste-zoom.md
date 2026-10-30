@@ -1,0 +1,74 @@
+# Plan: Schnelle Navigation, Bilderliste, Zoom (Teil A)
+
+Empfohlene Ausführung: Skill `plan-execute`, Economy-Stufe, neue Sitzung. **Teil A wird vor `verschieben-trash.md` (Teil B) ausgeführt.**
+
+## Goal
+
+VueChoixGarde (Python/Qt, `src/vuechoixgarde`, Tests unter `tests/`) bekommt
+1. schnelle Navigation: übersprungene Bilder werden nicht dekodiert, das Zielbild erscheint zügig,
+2. eine ein-/ausklappbare Bilderliste rechts mit Sprung per Klick,
+3. Zoom per Tasten `+`/`-` und Mausrad.
+
+## Context and constraints
+
+Die Requirements sind bereits fertig (`docs/requirements.md`, Version 0.8, Abschnitte FR-026, NFR-015, FR-130 bis FR-134, FR-140 bis FR-146, FR-083). **Der ausführende Agent ändert `docs/requirements.md` und `docs/adr/` nie.** Weicht die Umsetzung von einem Requirement ab, anhalten und melden.
+
+Verbindliche Vorgaben (Kurzfassung der Requirements):
+- Bilderliste: nur Dateinamen, keine Vorschaubilder; muss mit 10.000 Bildern nutzbar sein (virtualisierte Ansicht, keine Widgets pro Zeile). Aktuelles Bild hervorgehoben und sichtbar gescrollt; Reihenfolge entspricht der Sortierrichtung. Ein-/Ausklappen per Button und `F2`; Zustand wird nicht gespeichert, beim Start eingeklappt. Klick springt zum Bild (keine Dateioperation). Die Liste nimmt keinen Tastaturfokus: Pfeiltasten, Slot-Tasten und alle anderen Tasten wirken weiter im Hauptfenster.
+- Sterne: pro Bild höchstens drei Sterne, je in der Farbe eines Kopier-Slots, dessen Zielordner eine verifizierte verwaltete Kopie des Bildes enthält (Reihenfolge der Slots). Gibt es mehr als drei solche Slots, werden genau drei Sterne und danach drei Punkte (`…`) als Hinweis angezeigt. Slot-Namen als Tooltip (nicht nur Farbe).
+- Zoom: 100 % = bisherige Fit-Ansicht, Maximum 800 %, kein Zoomen unter 100 %. Mausrad zoomt um den Mauszeiger, `+`/`-` um die Bildmitte. Gemeint ist das erzeugte Zeichen `+`/`-`, auch Nummernblock. Ist die Taste einem Slot zugeordnet, gewinnt der Slot. Kein Zoom mit anderen Modifikatoren als Shift, bei Texteingabe oder offenem Dialog. Ziehen mit der Maus verschiebt das Bild (nicht komplett aus dem Fenster). Doppelklick oder `Strg+0` setzt auf 100 % zurück. Bei jedem Bildwechsel (Navigation, Sprung, Aktualisieren, Ordnerwechsel) Reset. Bei starkem Zoom wird das aktuelle Bild nachträglich in voller Auflösung geladen. Zoomstufe und Verschiebung werden nie gespeichert.
+- Schnelle Navigation: Beim schnellen Überspringen wird nur das Bild dekodiert, auf dem man zur Ruhe kommt. Nachbar-Vorladen und Slot-Statusabfragen warten, bis die Navigation zur Ruhe gekommen ist. Navigation schreibt nichts in die Anwendungsdaten.
+
+Code-Fundstellen (Stand der Erkundung, Zeilen können abweichen; bei Abweichung per `searchFiles` nach dem Namen suchen):
+- `src/vuechoixgarde/ui/workers.py` (`WorkerPools`: 1 Datei-Thread, 2 Decode-Threads, FIFO, kein Abbruch laufender Aufgaben).
+- `src/vuechoixgarde/ui/main_window.py` (Navigation ca. 1109-1133, Slot-Status ca. 650-720, Decode ca. 775-870, Slot-Taste ca. 880-970 und 1156-1205, Bildanzeige `image_label` ca. 205-220).
+- `src/vuechoixgarde/app/service.py` (`navigate_batch`, `plan_slot`, `execute_plan`).
+- `src/vuechoixgarde/store/state.py`, `src/vuechoixgarde/ports/`, `src/vuechoixgarde/core/slots.py`.
+- `src/vuechoixgarde/ui/keyboard.py`, `src/vuechoixgarde/core/native_keys.py`.
+- `src/vuechoixgarde/imaging/decoder.py`, `size.py`, `cache.py` (5 Einträge, 256 MiB).
+- i18n: `src/vuechoixgarde/i18n/de.json`, `en.json`, `fr.json`, geladen über `ui/texts.py`; `tests/unit/test_i18n_catalogs.py` verlangt gleiche Schlüssel und Platzhalter in allen Sprachen.
+- Tests: pytest, UI-Tests mit pytest-qt (`tests/ui`), offscreen über `tests/conftest.py`. Aufruf `uv run pytest <pfad> -q`, Lint `uv run ruff check src tests`.
+- Hinweis `.deutschlandgpt/plans/pfeiltasten-navigation-fokus.md`: Fokus-Mechanismus für die Pfeiltasten, beim Dock beachten.
+
+Hypothese zur Langsamkeit (ungemessen): Jeder Navigationsschritt reiht aktuelles Bild und je zwei Nachbarn in den FIFO-Pool ein; laufende Dekodierungen sind nicht abbrechbar; veraltete Ergebnisse werden erst nach vollständigem Dekodieren verworfen; Slot-Statusabfragen teilen sich den Ein-Thread-Datei-Worker. Datenbank-Schreibvorgänge bei Navigation wurden nicht gefunden. Schritt 1 misst zuerst.
+
+Allgemeine Regeln:
+- Pro Schritt nur die genannten Dateien ändern; jede Datei vor dem Ändern lesen. Tests zuerst schreiben, rot aus dem richtigen Grund sehen, dann implementieren.
+- Nach jedem Schritt: der genannte Test ist grün und `uv run pytest tests -q -x` bricht nicht.
+- Keine neuen Abhängigkeiten. Neue UI-Texte nur über die i18n-Kataloge (de, en, fr) im bestehenden Namensschema.
+- Keine Dateien lesen, die `secret`, `token`, `password`, `credential`, `.env`, `.pem`, `.key` im Namen haben.
+
+## Steps
+
+- [ ] **1 Test zur Navigation (rot)** – neue Datei `tests/ui/test_navigation_speed.py`. Mit einem künstlich langsamen Fake-Decoder (ca. 200 ms pro Bild per `time.sleep`; Fakes aus `tests/fakes/__init__.py` und Aufbau aus `tests/ui/test_main_window.py` wiederverwenden) 30 Mal schnell „Pfeil rechts“ auslösen. Erwartet: (a) höchstens 3 Dekodierungen werden tatsächlich gestartet, (b) das Zielbild ist spätestens ca. 1 s nach dem letzten Tastendruck sichtbar, (c) während schneller Navigation startet keine Slot-Statusabfrage, sondern genau eine nach der Ruhe. Test: `uv run pytest tests/ui/test_navigation_speed.py -q` schlägt fehl; Ausgabe im Progress log notieren.
+- [ ] **2 Dekodierung priorisieren und abbrechen** – `src/vuechoixgarde/ui/workers.py`, `src/vuechoixgarde/ui/main_window.py` (Abschnitt Decode). Decode-Aufgaben tragen die Navigations-Generation; eine noch nicht gestartete Aufgabe mit veralteter Generation wird beim Start sofort übersprungen (kein Dekodieraufruf). Das aktuelle Bild wird sofort angefordert, Nachbarn (je Richtung bis zu zwei) erst nach einer Ruhepause von ca. 150 ms (Single-Shot-Timer, bei jeder Navigation neu gestartet). Cache-Verhalten und Generationsprüfung beim Ergebnis bleiben. Test: `uv run pytest tests/ui/test_navigation_speed.py -q -k decode` grün, dann `uv run pytest tests/ui/test_main_window.py tests/ui/test_async_status.py -q` grün.
+- [ ] **3 Slot-Status erst bei Ruhe** – `src/vuechoixgarde/ui/main_window.py`: Die Slot-Statusabfrage nach einem Navigationsschritt wird mit demselben Ruhe-Timer verzögert und beim nächsten Schritt verworfen, bevor sie in den Datei-Worker gestellt wird. Bestehende Prüfungen (Generation, Bildname, Slot-Anzahl) bleiben. Test: `uv run pytest tests/ui/test_navigation_speed.py tests/ui/test_async_status.py -q` komplett grün. Zeigt der Test (b) danach keine Besserung, anhalten und melden.
+- [ ] **4 Sprung-Navigation im Service** – `src/vuechoixgarde/app/service.py` und die Sitzungsklasse (Datei per `searchFiles "class FolderSession"` finden): Methode zum direkten Springen auf einen Index (z. B. `navigate_to(index)`) mit Grenzprüfung. Tests zuerst in `tests/unit/test_navigation.py`: Index außerhalb wird abgelehnt, gültiger Index setzt aktuelles Bild und Fortschritt korrekt. Test: `uv run pytest tests/unit/test_navigation.py tests/unit/test_app_phase4.py -q` grün.
+- [ ] **5 Bilderliste: Modell und Widget** – neue Datei `src/vuechoixgarde/ui/image_list.py` mit `ImageListPanel` (`QListView` mit eigenem Listenmodell auf Basis von `QAbstractListModel`; ein Delegate zeichnet Dateiname und die Sterne). Das Modell nimmt pro Bild eine Liste von Slot-Farben und Slot-Namen entgegen; der Delegate zeichnet höchstens drei Sterne und, wenn mehr Einträge vorhanden sind, danach drei Punkte; Tooltip nennt die Slot-Namen. Aktuelles Bild hervorgehoben, `Qt.NoFocus`, Signal `image_requested(index)` bei Klick. Tests zuerst in neuer Datei `tests/ui/test_image_list.py`: 10.000 Einträge in unter 1 s ohne Widgets pro Zeile; Klick sendet das Signal; kein Fokus; bei vier Slot-Farben genau drei Sterne plus Punkte; bei zwei Farben zwei Sterne ohne Punkte. Test: `uv run pytest tests/ui/test_image_list.py -q` grün.
+- [ ] **6 Bilderliste ins Hauptfenster** – `src/vuechoixgarde/ui/main_window.py`, `src/vuechoixgarde/ui/keyboard.py`: Panel als rechtes `QDockWidget` (ohne Schließen-/Verschieben-Funktionen, kein Fokus), beim Start eingeklappt; Button in der Werkzeugleiste und Taste `F2` (neben `F1`/`F5` eintragen, bei Dialogen/Texteingabe wie andere Tasten ausgesetzt) schalten um; Zustand nicht speichern. `image_requested` ruft `navigate_to` und lädt wie bei Pfeiltasten (Ruhe-Mechanik aus Schritt 2). Das aktuelle Bild wird nach jeder Navigation markiert und sichtbar gescrollt; Liste wird beim Ordnerwechsel, `F5` und Sortierwechsel neu befüllt. Tests in `tests/ui/test_main_window.py` und `tests/ui/test_keyboard.py`: Start eingeklappt, `F2` klappt auf/zu, nach Klick in die Liste navigiert die Pfeiltaste weiter. Test: `uv run pytest tests/ui/test_main_window.py tests/ui/test_keyboard.py tests/ui/test_image_list.py -q` grün.
+- [ ] **7 Sterne mit Slot-Farben** – `src/vuechoixgarde/store/state.py`, Port in `src/vuechoixgarde/ports/`, Service-Methode, Anbindung an das Listenmodell. Eine einzige Abfrage liefert für alle Bilder eines Ordners die Slots mit verwalteter Kopie (nicht je Bild abfragen). Nur Kopier-Slots zählen; Teil B ergänzt später den Modus, hier genügt es, alle Slots zu berücksichtigen und die Stelle klar für die Modus-Filterung zu kapseln. Aktualisierung nach jedem Toggle, nach „Zielordner löschen“ und beim Laden, asynchron über den Datei-Worker und mit Ruhe-Verzögerung. Tests zuerst: `tests/integration/test_store.py` (Abfrage liefert pro Bild die Slot-Zuordnung, auch mit 10.000 Bildern in vertretbarer Zeit) und `tests/ui/test_image_list.py` (Stern in Slot-Farbe, Aktualisierung nach Toggle). Test: `uv run pytest tests/integration/test_store.py tests/ui/test_image_list.py tests/ui/test_async_status.py -q` grün.
+- [ ] **8 Zoom-Logik (rein, ohne Fenster)** – neue Datei `src/vuechoixgarde/ui/zoom.py`: Zustandsobjekt mit Stufe 1.0 bis 8.0 (multiplikative Schritte, z. B. Faktor 1,25), Offset, Zoom um einen Ankerpunkt, Begrenzung des Offsets (Bild bleibt im Fenster), Reset. Tests zuerst in neuer Datei `tests/unit/test_zoom.py`: Grenzen 100 %/800 %, kein Zoomen unter 100 %, Anker bleibt unter dem Zeiger, Reset, Offset-Begrenzung. Test: `uv run pytest tests/unit/test_zoom.py -q` grün.
+- [ ] **9 Bildansicht mit Zoom** – neue Datei `src/vuechoixgarde/ui/image_view.py` (eigenes Widget mit `paintEvent`; ersetzt `image_label` in `main_window.py` samt der Fit-Logik). Mausrad zoomt um den Zeiger, Ziehen mit linker Maustaste verschiebt, Doppelklick setzt zurück; 100 % entspricht exakt der bisherigen Fit-Ansicht; Reset bei jedem Bildwechsel und Ordnerwechsel; nichts wird gespeichert. Tests in `tests/ui/test_main_window.py`: Rad vergrößert, Bildwechsel setzt zurück, Doppelklick setzt zurück. Bestehende Tests, die `image_label` nutzen, anpassen. Test: `uv run pytest tests/ui/test_main_window.py tests/unit/test_zoom.py -q` grün.
+- [ ] **10 Zoom-Tasten und Nachladen in voller Auflösung** – `src/vuechoixgarde/ui/main_window.py`, `src/vuechoixgarde/ui/keyboard.py`, `src/vuechoixgarde/imaging/decoder.py`, `src/vuechoixgarde/imaging/size.py`: `+`/`-` (erzeugtes Zeichen, auch Nummernblock) zoomen um die Bildmitte, `Strg+0` setzt zurück. **Slot-Belegung hat Vorrang**: Ist die Taste einem Slot zugeordnet, wirkt nur der Slot (Reihenfolge der Tastenauswertung beachten). Ab Zoom über ca. 150 % wird das aktuelle Bild einmal ohne Verkleinerung dekodiert (eigener Cache-Eintrag, über die Generation aus Schritt 2 abgesichert); das Ergebnis ersetzt die Anzeige nur, wenn es noch das aktuelle Bild ist. Tests zuerst in `tests/ui/test_keyboard.py`, `tests/unit/test_imaging.py`, `tests/unit/test_imaging_size.py`: Plus/Minus zoomen, Slot auf `+`/`-` gewinnt, Nachladen genau einmal pro Bild und Zoom-Episode. Test: `uv run pytest tests/ui/test_keyboard.py tests/unit/test_imaging.py tests/unit/test_imaging_size.py tests/ui/test_main_window.py -q` grün.
+- [ ] **11 Texte, Hilfe, Dokumentation, Gesamtlauf** – `src/vuechoixgarde/i18n/de.json`, `en.json`, `fr.json` (Bilderliste: Button, Tooltip, Beschriftung; Hilfe: `F2`, Zoom-Tasten, Rad, Ziehen, Doppelklick, `Strg+0`, Sterne und Punkte), `docs/user-guide.md`, `docs/keyboard-test-checklist.md`, `docs/manual-test-plan.md`, `CHANGELOG.md`. Test: `uv run pytest tests -q` komplett grün und `uv run ruff check src tests` ohne Fehler.
+
+## Risks and open questions
+
+- Die Ursache der Langsamkeit ist ungemessen. Bringt Schritt 3 keine Besserung im Test aus Schritt 1, anhalten und melden, nicht raten.
+- Laufende Dekodierungen sind nicht abbrechbar; sie blockieren einen der zwei Threads bis zum Ende. Bei sehr großen Dateien bleibt eine Restverzögerung.
+- Die Liste darf keinen Fokus ziehen (siehe `pfeiltasten-navigation-fokus.md`).
+- Bestehende Nutzerprofile könnten `+`/`-` einem Slot zugeordnet haben; Slot gewinnt, daher keine Migration.
+- Sterne-Abfrage bei 10.000 Bildern: Performance in Schritt 7 mit großem Test absichern.
+- Nach Teil B (Verschieben) muss die Sterne-Abfrage nur Kopier-Slots berücksichtigen; das wird in Teil B Schritt 8 erledigt.
+- BLOCKING: keines.
+
+## Done when
+
+- `uv run pytest tests -q` und `uv run ruff check src tests` laufen fehlerfrei.
+- Schnelles Überspringen mit langsamem Fake-Decoder: höchstens 3 Dekodierungen gestartet, Zielbild ca. 1 s nach dem letzten Tastendruck sichtbar.
+- Bilderliste: beim Start eingeklappt, `F2` und Button schalten um, Klick springt, Pfeiltasten funktionieren danach weiter, höchstens drei Sterne in Slot-Farben plus Punkte bei mehr Treffern.
+- Zoom: 100 % bis 800 %, Tasten, Rad, Ziehen, Doppelklick/`Strg+0`, Reset bei Bildwechsel, nichts gespeichert, Slot-Taste hat Vorrang.
+
+## Progress log
+
+(leer)
