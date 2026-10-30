@@ -101,7 +101,7 @@ def test_language_retranslation_works_without_open_folder(qtbot: QtBot, tmp_path
     set_language("de")
     window._retranslate()
     assert window.open_button.text() == "Ordner öffnen…"
-    assert window.image_label.text() == text("empty")
+    assert window.image_view.message == text("empty")
     assert window.profile_label.text() == text("empty")
 
     set_language("fr")

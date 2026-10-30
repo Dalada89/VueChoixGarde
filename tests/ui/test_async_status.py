@@ -38,9 +38,7 @@ def test_image_is_displayed_while_slot_status_lookup_is_blocked(
         qtbot.waitUntil(lambda: window.view is not None, timeout=5000)
         qtbot.waitUntil(started.is_set, timeout=5000)
         qtbot.waitUntil(
-            lambda: (
-                window.image_label.pixmap() is not None and not window.image_label.pixmap().isNull()
-            ),
+            lambda: window.image_view.image is not None and not window.image_view.image.isNull(),
             timeout=5000,
         )
         assert not release.is_set()

@@ -22,6 +22,20 @@ def test_decoder_applies_exif_orientation_and_never_upscales(tmp_path: Path) -> 
     assert PillowImageDecoder().decode(path, 2, 2).width <= 2
 
 
+def test_full_resolution_decode_bounds_preserve_source_size_and_exif_orientation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "full-resolution.jpg"
+    source = Image.new("RGB", (640, 480), "red")
+    exif = Image.Exif()
+    exif[274] = 6
+    source.save(path, exif=exif)
+
+    decoded = PillowImageDecoder().decode_full_resolution(path)
+
+    assert (decoded.width, decoded.height) == (480, 640)
+
+
 def test_decoder_preserves_png_alpha_and_decodes_only_first_frame(tmp_path: Path) -> None:
     alpha_path = tmp_path / "alpha.png"
     Image.new("RGBA", (3, 2), (20, 30, 40, 100)).save(alpha_path)

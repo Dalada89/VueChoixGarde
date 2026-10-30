@@ -1,5 +1,7 @@
 import pytest
+from PIL import Image
 
+from vuechoixgarde.bootstrap import create_runtime
 from vuechoixgarde.core.navigation import (
     ImageNavigation,
     NavigationDirection,
@@ -81,3 +83,34 @@ def test_refresh_sets_current_to_none_for_an_empty_list() -> None:
 def test_navigation_on_an_empty_list_is_a_no_op(direction: NavigationDirection) -> None:
     state = create_navigation([])
     assert navigate(state, direction) == state
+
+
+def _open_navigation_runtime(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    for index in range(3):
+        Image.new("RGB", (2, 2)).save(source / f"image-{index:03}.png")
+    runtime = create_runtime(tmp_path / "app-data")
+    runtime.service.open_folder(source)
+    return runtime
+
+
+@pytest.mark.parametrize("index", [-1, 3])
+def test_session_service_rejects_out_of_range_navigation_index(tmp_path, index: int) -> None:
+    runtime = _open_navigation_runtime(tmp_path)
+    try:
+        with pytest.raises(IndexError):
+            runtime.service.navigate_to(index)
+    finally:
+        runtime.shutdown()
+
+
+def test_session_service_navigates_to_index_and_updates_progress(tmp_path) -> None:
+    runtime = _open_navigation_runtime(tmp_path)
+    try:
+        view = runtime.service.navigate_to(1)
+        assert view.snapshot.current_name == "image-001.png"
+        assert view.snapshot.image_index == 2
+        assert view.snapshot.image_count == 3
+    finally:
+        runtime.shutdown()

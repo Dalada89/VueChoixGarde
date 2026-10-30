@@ -16,6 +16,7 @@ from vuechoixgarde.app.results import (
     FolderManagementError,
     FolderManagementReason,
     FolderRename,
+    ReconcileItem,
     SessionSnapshot,
     SlotState,
     UseCaseStatus,
@@ -27,12 +28,14 @@ from vuechoixgarde.core.destination import destination_folder_key
 from vuechoixgarde.core.folder_names import validate_folder_name
 from vuechoixgarde.core.navigation import NavigationDirection, change_sort_direction
 from vuechoixgarde.core.slots import DEFAULT_SLOTS, Slot, validate_slot_profile
+from vuechoixgarde.core.toggle import FileClass, ToggleAction
 from vuechoixgarde.ports.clock import Clock
 from vuechoixgarde.ports.errors import FileSystemError, FileSystemErrorReason
 from vuechoixgarde.ports.filesystem import FileSystemPort, SourceFolderScanner
 from vuechoixgarde.ports.lock import FolderLockFactory
 from vuechoixgarde.ports.log import EventLogger, LogEvent, LogLevel
 from vuechoixgarde.ports.models import (
+    CopyRecord,
     DestinationStatus,
     EntryKind,
     FolderRenameRecord,
@@ -78,6 +81,7 @@ class SlotStatusResult:
     slot_states: tuple[SlotState, ...]
     selected_image_count: int
     warning: str | None = None
+    image_slot_info: tuple[tuple[tuple[str, str], ...], ...] = ()
 
 
 class SessionService:
@@ -156,8 +160,16 @@ class SessionService:
             session.navigate(direction)
         return self._view()
 
+    def navigate_to(self, index: int) -> SessionView:
+        """Select an image by its zero-based position in the current sorted list."""
+        self._require_session().navigate_to(index)
+        return self._view()
+
     def refresh(self) -> SessionView:
-        self._require_session().refresh()
+        session = self._require_session()
+        session.refresh()
+        if self.register_available and not session.recovery_pending:
+            session.reconcile(automatic=True)
         return self._view()
 
     def set_sort_direction(self, descending: bool) -> SessionView:
@@ -207,7 +219,40 @@ class SessionService:
         )
         if result.status is UseCaseStatus.MODIFIED_CONFIRMATION_REQUIRED:
             session.reconcile(automatic=False)
+        elif result.status is UseCaseStatus.OK and result.action is ToggleAction.TOGGLE_ON:
+            self._mark_new_copies_verified(session, plan, result)
         return result, self._view()
+
+    def _mark_new_copies_verified(
+        self, session: FolderSession, plan: TogglePlan, result: ToggleResult
+    ) -> None:
+        if plan.destination_name is None:
+            return
+        destination_folder = plan.destination_folder or session.source_path / plan.destination_name
+        try:
+            records = self.state_store.copy_records(session.profile.id, str(destination_folder))
+        except Exception:
+            self._log_warning("new managed copies could not be verified for the image list")
+            return
+        changed_names = set(result.changed_files)
+        added = tuple(
+            ReconcileItem(record, FileClass.VERIFIED)
+            for record in records
+            if record.destination_name in changed_names
+        )
+        if not added:
+            return
+        added_keys = {
+            (item.record.destination_folder, item.record.destination_name) for item in added
+        }
+        session.reconciled = (
+            tuple(
+                item
+                for item in session.reconciled
+                if (item.record.destination_folder, item.record.destination_name) not in added_keys
+            )
+            + added
+        )
 
     def learn_key(self, position: str, value: str, *, modifier_active: bool) -> SessionView | None:
         """Persist a newly learned key label and say whether visible slot labels changed."""
@@ -246,9 +291,11 @@ class SessionService:
             warning = "slot_status_failed"
             self._log_warning("slot state lookup failed")
         selected = 0
+        image_slot_info = tuple(() for _ in session.navigation.images)
         if self.register_available:
             try:
                 records = self.state_store.copy_records(session.profile.id)
+                image_slot_info = self.image_slot_info(records)
                 selected_names = {
                     record.source_name
                     for record in records
@@ -271,7 +318,37 @@ class SessionService:
             except Exception:
                 warning = "selection_count_failed"
                 self._log_warning("selected-image count could not be loaded")
-        return SlotStatusResult(image_name, generation, states, selected, warning)
+        return SlotStatusResult(image_name, generation, states, selected, warning, image_slot_info)
+
+    def image_slot_info(
+        self, records: tuple[CopyRecord, ...] | None = None
+    ) -> tuple[tuple[tuple[str, str], ...], ...]:
+        """Map one profile-wide copy-register read to verified slots for sorted images."""
+        session = self._require_session()
+        image_names = session.navigation.images
+        if not self.register_available:
+            return tuple(() for _ in image_names)
+        if records is None:
+            records = self.state_store.copy_records(session.profile.id)
+        verified_records = {
+            item.record for item in session.reconciled if item.file_class is FileClass.VERIFIED
+        }
+        image_name_by_key = {comparison_key(name): name for name in image_names}
+        slots_by_image: dict[str, list[tuple[str, str]]] = {name: [] for name in image_names}
+        for slot in session.profile.slots:
+            destination_name = slot.destination_name
+            if destination_name is None:
+                continue
+            destination_key = comparison_key(str(session.source_path / destination_name))
+            for record in records:
+                image_name = image_name_by_key.get(comparison_key(record.source_name))
+                if (
+                    record in verified_records
+                    and image_name is not None
+                    and comparison_key(record.destination_folder) == destination_key
+                ):
+                    slots_by_image[image_name].append((slot.color, destination_name))
+        return tuple(tuple(slots_by_image[name]) for name in image_names)
 
     def save_settings_and_profile_slots(
         self,

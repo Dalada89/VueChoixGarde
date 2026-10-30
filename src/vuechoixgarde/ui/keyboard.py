@@ -94,6 +94,28 @@ def main_window_key_filter_enabled() -> bool:
     return True
 
 
+def is_image_list_toggle_key(event: QKeyEvent) -> bool:
+    """Return whether this is an unmodified F2 image-list toggle press."""
+    return event.key() == Qt.Key.Key_F2 and not event.modifiers()
+
+
+def zoom_factor_from_event(event: QKeyEvent) -> float | None:
+    """Return the zoom factor for a generated sign with only Shift or Keypad modifiers."""
+    allowed_modifiers = Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.KeypadModifier
+    if event.modifiers() & ~allowed_modifiers:
+        return None
+    if event.text() == "+":
+        return 1.25
+    if event.text() == "-":
+        return 0.8
+    return None
+
+
+def is_zoom_reset_event(event: QKeyEvent) -> bool:
+    """Return whether this is the exact Ctrl+0 zoom reset combination."""
+    return event.key() == Qt.Key.Key_0 and event.modifiers() == Qt.KeyboardModifier.ControlModifier
+
+
 def keyboard_event_data(
     event: QKeyEvent, *, platform: NativeKeyPlatform | None = None
 ) -> KeyboardEventData:

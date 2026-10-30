@@ -31,16 +31,18 @@ class _Task(QRunnable):
         function: Callable[[], object],
         callback: Callback,
         dispatcher: _Dispatcher,
+        should_run: Callable[[], bool] | None,
     ) -> None:
         super().__init__()
         self.task_id = task_id
         self.function = function
         self.callback = callback
         self.dispatcher = dispatcher
+        self.should_run = should_run
 
     def run(self) -> None:
         try:
-            result = self.function()
+            result = self.function() if self.should_run is None or self.should_run() else None
         except Exception as error:
             self.dispatcher.delivered.emit(self.task_id, self.callback, None, error)
         else:
@@ -62,10 +64,16 @@ class WorkerPool:
     def _release_task(self, task_id: int) -> None:
         self._tasks.pop(task_id, None)
 
-    def submit(self, function: Callable[[], object], callback: Callback) -> None:
+    def submit(
+        self,
+        function: Callable[[], object],
+        callback: Callback,
+        *,
+        should_run: Callable[[], bool] | None = None,
+    ) -> None:
         """Schedule work without blocking the caller or invoking callbacks on workers."""
         task_id = next(self._ids)
-        task = _Task(task_id, function, callback, self._dispatcher)
+        task = _Task(task_id, function, callback, self._dispatcher, should_run)
         self._tasks[task_id] = task
         self._pool.start(task)
 

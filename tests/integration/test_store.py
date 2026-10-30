@@ -2,6 +2,7 @@ import hashlib
 import json
 import sqlite3
 from pathlib import Path
+from time import monotonic
 from uuid import uuid4
 
 import pytest
@@ -573,3 +574,40 @@ def test_state_journal_mark_rolled_back_and_recovered(tmp_path: Path, fixed_cloc
         store.start_operation(operation_id, profile.id, "Best", ())
         action(operation_id)
         assert all(record.state is not expected for record in store.unfinished_operations())
+
+
+def test_copy_records_bulk_query_handles_ten_thousand_images(tmp_path: Path, fixed_clock) -> None:
+    store = SQLiteStateStore(tmp_path / "app", fixed_clock)
+    store.load()
+    profile = store.create_profile_from_template("/source", "/source", DEFAULT_SLOTS)
+    operation_id = uuid4().hex
+    names = tuple(f"image-{index:05}.png" for index in range(10_000))
+    digest = hashlib.sha256(b"image").hexdigest()
+    files = tuple(
+        OperationFileRecord(index, temp_file_name(operation_id, index), name, 5, digest)
+        for index, name in enumerate(names)
+    )
+    copies = tuple(
+        CopyRecord(
+            profile.id,
+            "/source",
+            name,
+            "/source/Best",
+            name,
+            5,
+            digest,
+            1,
+            "2025-01-02T03:04:05.123456Z",
+        )
+        for name in names
+    )
+    store.start_operation(operation_id, profile.id, "Best", files)
+    store.complete_operation(operation_id, copies)
+
+    started_at = monotonic()
+    loaded = store.copy_records(profile.id)
+    elapsed = monotonic() - started_at
+
+    assert len(loaded) == 10_000
+    assert {record.source_name for record in loaded} == set(names)
+    assert elapsed < 2.0

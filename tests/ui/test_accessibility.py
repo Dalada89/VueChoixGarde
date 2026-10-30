@@ -15,13 +15,22 @@ from vuechoixgarde.ui.main_window import MainWindow
 from vuechoixgarde.ui.texts import set_language, text
 
 
+def test_image_message_has_accessible_description(qtbot: QtBot, tmp_path: Path) -> None:
+    window = MainWindow(create_runtime(tmp_path / "app-data"))
+    qtbot.addWidget(window)
+
+    assert window.image_view.accessibleDescription() == text("empty")
+
+    window.close()
+
+
 def test_main_controls_have_accessible_names(qtbot: QtBot, tmp_path: Path) -> None:
     window = MainWindow(create_runtime(tmp_path / "app-data"))
     qtbot.addWidget(window)
 
     for button in window.findChildren(QPushButton):
         assert button.accessibleName(), button.text()
-    for widget in (window.profile_label, window.image_label, window.filename_label):
+    for widget in (window.profile_label, window.image_view, window.filename_label):
         assert widget.accessibleName()
     assert window.progress.accessibleName()
 

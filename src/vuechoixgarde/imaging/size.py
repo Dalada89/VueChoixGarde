@@ -2,6 +2,13 @@
 
 from math import ceil, isfinite
 
+_FULL_RESOLUTION_BOUND = 2**31 - 1
+
+
+def full_resolution_decode_bounds() -> tuple[int, int]:
+    """Return decoder limits high enough to preserve every accepted source pixel."""
+    return (_FULL_RESOLUTION_BOUND, _FULL_RESOLUTION_BOUND)
+
 
 def screen_decode_bounds(
     width: int,

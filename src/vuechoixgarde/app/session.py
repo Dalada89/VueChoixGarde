@@ -181,6 +181,18 @@ class FolderSession:
         self.navigation = updated
         return self.snapshot()
 
+    def navigate_to(self, index: int) -> SessionSnapshot:
+        """Select an image by its zero-based position in the current sorted list."""
+        if not 0 <= index < len(self.navigation.images):
+            raise IndexError(index)
+        self.navigation = ImageNavigation(
+            self.navigation.images,
+            self.navigation.images[index],
+            self.navigation.descending,
+        )
+        self.boundary_reached = False
+        return self.snapshot()
+
     def set_sort_direction(self, *, descending: bool) -> SessionSnapshot:
         """Persist sort preference and reorder while preserving the current image."""
         updated_navigation = change_sort_direction(self.navigation, descending=descending)

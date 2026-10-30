@@ -5,6 +5,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from vuechoixgarde.imaging.size import full_resolution_decode_bounds
 from vuechoixgarde.ports.errors import ImageDecodeError, ImageDecodeErrorReason
 from vuechoixgarde.ports.imaging import DecodedImage
 
@@ -24,6 +25,10 @@ except Exception:
 
 class PillowImageDecoder:
     """Decode the first frame/page from an image without ever writing to its source."""
+
+    def decode_full_resolution(self, path: Path) -> DecodedImage:
+        """Decode the first frame/page without reducing its source dimensions."""
+        return self.decode(path, *full_resolution_decode_bounds())
 
     def decode(self, path: Path, max_width: int, max_height: int) -> DecodedImage:
         """Orient, downscale and return packed RGB(A) bytes for the UI thread."""

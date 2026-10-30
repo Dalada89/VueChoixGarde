@@ -12,7 +12,6 @@ from PySide6.QtGui import (
     QImage,
     QKeyEvent,
     QKeySequence,
-    QPixmap,
     QResizeEvent,
     QShortcut,
 )
@@ -20,6 +19,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
+    QDockWidget,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -59,13 +60,21 @@ from vuechoixgarde.core.keys import displayed_key_label, update_learned_key_labe
 from vuechoixgarde.core.navigation import NavigationDirection
 from vuechoixgarde.core.sorting import sort_names
 from vuechoixgarde.imaging.cache import DecodedImageCache
-from vuechoixgarde.imaging.size import screen_decode_bounds
+from vuechoixgarde.imaging.size import full_resolution_decode_bounds, screen_decode_bounds
 from vuechoixgarde.ports.errors import ImageDecodeError, ImageDecodeErrorReason
 from vuechoixgarde.ports.imaging import DecodedImage
 from vuechoixgarde.ports.log import LogEvent, LogLevel
 from vuechoixgarde.ports.models import Settings
 from vuechoixgarde.ui.help_dialog import HelpDialog
-from vuechoixgarde.ui.keyboard import keyboard_event_data, main_window_key_filter_enabled
+from vuechoixgarde.ui.image_list import ImageListPanel
+from vuechoixgarde.ui.image_view import ImageView
+from vuechoixgarde.ui.keyboard import (
+    is_image_list_toggle_key,
+    is_zoom_reset_event,
+    keyboard_event_data,
+    main_window_key_filter_enabled,
+    zoom_factor_from_event,
+)
 from vuechoixgarde.ui.settings_dialog import SettingsDialog, SettingsSubmission
 from vuechoixgarde.ui.sound import SoundPlayer
 from vuechoixgarde.ui.texts import set_language, text
@@ -150,6 +159,17 @@ class MainWindow(QMainWindow):
         self._slot_status_requested: SessionView | None = None
         self._navigation_in_flight = False
         self._queued_navigation: list[NavigationDirection] = []
+        self._full_resolution_request: tuple[Path, int] | None = None
+        self._full_resolution_cache: tuple[Path, DecodedImage] | None = None
+        self._neighbor_decode_timer = QTimer(self)
+        self._neighbor_decode_timer.setSingleShot(True)
+        self._neighbor_decode_timer.setInterval(150)
+        self._neighbor_decode_timer.timeout.connect(self._decode_neighbors)
+        self._neighbor_decode_generation = 0
+        self._neighbor_decode_paths: tuple[Path, ...] = ()
+        self._image_list_source_images: tuple[str, ...] | None = None
+        self._image_list_descending: bool | None = None
+        self._image_list_names: tuple[str, ...] = ()
         self._closing = False
         self._ready_to_close = False
         self._shutdown_started = False
@@ -159,6 +179,7 @@ class MainWindow(QMainWindow):
         self._close_busy_timer.setInterval(1000)
         self._close_busy_timer.timeout.connect(lambda: self.busy_label.show())
         self._build_ui()
+        self.image_view.zoom_changed.connect(self._on_zoom_changed)
         application = QApplication.instance()
         if application is not None:
             application.installEventFilter(self)
@@ -197,6 +218,14 @@ class MainWindow(QMainWindow):
         self.open_button = QPushButton(text("open_folder"))
         self.open_button.clicked.connect(self._choose_folder)
         top.addWidget(self.open_button)
+        self.image_list_button = QPushButton()
+        self.image_list_button.setAccessibleName("F2")
+        self.image_list_button.setToolTip("F2")
+        self.image_list_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogListView)
+        )
+        self.image_list_button.clicked.connect(self._toggle_image_list)
+        top.addWidget(self.image_list_button)
         self.sort_button = QPushButton(text("sort_ascending"))
         self.sort_button.clicked.connect(self._toggle_sort)
         top.addWidget(self.sort_button)
@@ -216,13 +245,10 @@ class MainWindow(QMainWindow):
         top.addWidget(self.help_button)
         layout.addLayout(top)
 
-        self.image_label = QLabel(text("empty"))
-        self.image_label.setObjectName("panel")
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setAccessibleName(text("image_accessible"))
-        self.image_label.setMinimumSize(320, 240)
-        self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        layout.addWidget(self.image_label, 1)
+        self.image_view = ImageView(text("empty"))
+        self.image_view.setAccessibleName(text("image_accessible"))
+        self.image_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(self.image_view, 1)
 
         info = QHBoxLayout()
         self.filename_label = QLabel(text("filename"))
@@ -259,6 +285,16 @@ class MainWindow(QMainWindow):
         self.busy_label.hide()
         layout.addWidget(self.busy_label)
         self.setCentralWidget(root)
+        self.image_list = ImageListPanel(self)
+        self.image_list.image_requested.connect(self._navigate_to_image)
+        self.image_list_dock = QDockWidget(self)
+        self.image_list_dock.setObjectName("imageListDock")
+        self.image_list_dock.setAccessibleName("F2")
+        self.image_list_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+        self.image_list_dock.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.image_list_dock.setWidget(self.image_list)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.image_list_dock)
+        self.image_list_dock.hide()
         self.profile_label.setAccessibleName(text("current_profile"))
         self.open_button.setAccessibleName(text("open_folder"))
         self.sort_button.setAccessibleName(text("sort_ascending"))
@@ -327,7 +363,7 @@ class MainWindow(QMainWindow):
         self.settings_button.setAccessibleName(text("settings"))
         self.help_button.setAccessibleName(text("help"))
         self.star_label.setAccessibleName(text("selected_accessible"))
-        self.image_label.setAccessibleName(text("image_accessible"))
+        self.image_view.setAccessibleName(text("image_accessible"))
         self.filename_label.setAccessibleName(text("filename"))
         self.selected_label.setAccessibleName(text("selected_count", count=0))
         self.progress_text.setAccessibleName(text("progress", current=0, total=0))
@@ -337,8 +373,7 @@ class MainWindow(QMainWindow):
         else:
             self.profile_label.setText(text("empty"))
             self.profile_label.setToolTip("")
-            self.image_label.setPixmap(QPixmap())
-            self.image_label.setText(text("empty"))
+            self.image_view.set_message(text("empty"))
             self.filename_label.setText(text("filename"))
             self.filename_label.setToolTip("")
             self.selected_label.setText(text("selected_count", count=0))
@@ -350,6 +385,13 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, text("open_dialog_title"))
         if folder:
             self._open_folder(Path(folder))
+
+    def _toggle_image_list(self) -> None:
+        self.image_list_dock.setVisible(not self.image_list_dock.isVisible())
+
+    def _navigate_to_image(self, index: int) -> None:
+        if self.view is not None:
+            self._run_file(lambda: self.runtime.service.navigate_to(index))
 
     def _open_folder(self, path: Path) -> None:
         self._run_file(lambda: self.runtime.service.open_folder(path))
@@ -624,6 +666,19 @@ class MainWindow(QMainWindow):
         self.view = view
         snapshot = view.snapshot
         self._set_open_state(True)
+        source_images = snapshot.scan.images
+        if (
+            source_images != self._image_list_source_images
+            or snapshot.descending != self._image_list_descending
+        ):
+            self._image_list_names = tuple(
+                sort_names(source_images, descending=snapshot.descending)
+            )
+            self._image_list_source_images = source_images
+            self._image_list_descending = snapshot.descending
+            self.image_list.set_images(self._image_list_names)
+        current_index = snapshot.image_index - 1 if snapshot.current_name is not None else None
+        self.image_list.set_current_index(current_index)
         self.profile_label.setText(Path(snapshot.source_path).name or snapshot.source_path)
         self.profile_label.setToolTip(text("source_folder", path=snapshot.source_path))
         self.sort_button.setText(
@@ -638,8 +693,8 @@ class MainWindow(QMainWindow):
             self.progress_text.setText(text("progress", current=0, total=snapshot.image_count))
             self.progress.setRange(0, 0)
             self.star_label.hide()
-            self.image_label.setPixmap(QPixmap())
-            self.image_label.setText(text("empty_folder"))
+            self.image_view.set_image(None)
+            self.image_view.set_message(text("empty_folder"))
         else:
             metrics = QFontMetrics(self.filename_label.font())
             display_name = metrics.elidedText(
@@ -673,8 +728,7 @@ class MainWindow(QMainWindow):
 
     def _schedule_slot_status(self, view: SessionView) -> None:
         self._slot_status_requested = view
-        if not self._slot_status_in_flight:
-            QTimer.singleShot(0, self._dispatch_slot_status)
+        self._neighbor_decode_timer.start()
 
     def _dispatch_slot_status(self) -> None:
         if self._closing or self._slot_status_in_flight or self._slot_status_requested is None:
@@ -716,13 +770,14 @@ class MainWindow(QMainWindow):
                 view.generation,
                 result.warning,
             )
+            self.image_list.set_slot_info(result.image_slot_info)
             self.selected_label.setText(text("selected_count", count=result.selected_image_count))
             self.star_label.setVisible(SlotState.SELECTED in result.slot_states)
             self._render_slots(self.view)
             warning = result.warning
         if warning is not None:
             self.statusBar().showMessage(text(warning), 5000)
-        if self._slot_status_requested is not None:
+        if self._slot_status_requested is not None and not self._neighbor_decode_timer.isActive():
             QTimer.singleShot(0, self._dispatch_slot_status)
 
     def _render_slots(self, view: SessionView) -> None:
@@ -774,49 +829,66 @@ class MainWindow(QMainWindow):
     def _request_neighborhood(self, view: SessionView) -> None:
         snapshot = view.snapshot
         current_name = snapshot.current_name
+        self._neighbor_decode_timer.stop()
+        self._neighbor_decode_paths = ()
         if current_name is None:
             self.cache.clear()
-            self.image_label.setPixmap(QPixmap())
-            self.image_label.setText(text("empty_folder"))
+            self.image_view.set_image(None)
+            self.image_view.set_message(text("empty_folder"))
             return
         ordered = sort_names(snapshot.scan.images, descending=snapshot.descending)
         try:
             index = ordered.index(current_name)
         except ValueError:
-            self.image_label.setText(text("decode_missing"))
+            self.image_view.set_message(text("decode_missing"))
             return
         names = ordered[max(0, index - 2) : index + 3]
         paths = tuple(Path(snapshot.source_path) / name for name in names)
         generation = self.cache.begin_generation(paths)
+        self._full_resolution_request = None
+        self._full_resolution_cache = None
         current_path = Path(snapshot.source_path) / current_name
         cached = self.cache.get(current_path)
         if cached is not None:
             self._show_decoded(cached)
         else:
-            self.image_label.setPixmap(QPixmap())
-            self.image_label.setText(text("busy"))
+            self.image_view.set_image(None)
+            self.image_view.set_message(text("busy"))
+        self._request_decode(current_path, generation)
+        self._neighbor_decode_generation = generation
+        self._neighbor_decode_paths = tuple(path for path in paths if path != current_path)
+        self._neighbor_decode_timer.start()
+
+    def _decode_neighbors(self) -> None:
+        generation = self._neighbor_decode_generation
+        paths, self._neighbor_decode_paths = self._neighbor_decode_paths, ()
+        if not self._closing and generation == self.cache.generation:
+            for path in paths:
+                self._request_decode(path, generation)
+        if not self._closing and self._slot_status_requested is not None:
+            self._dispatch_slot_status()
+
+    def _request_decode(self, path: Path, generation: int) -> None:
+        if self.cache.get(path) is not None:
+            return
         decoder = self.runtime.decoder
         max_width, max_height = self._decode_bounds()
-        for path in paths:
-            if self.cache.get(path) is not None:
-                continue
 
-            def decode(path: Path = path) -> DecodedImage:
-                return decoder.decode(path, max_width, max_height)
+        def decode() -> DecodedImage:
+            return decoder.decode(path, max_width, max_height)
 
-            self.workers.image_decoding.submit(
-                decode,
-                lambda result, error, path=path, generation=generation: self._decode_finished(
-                    path, generation, result, error
-                ),
-            )
+        self.workers.image_decoding.submit(
+            decode,
+            lambda result, error: self._decode_finished(path, generation, result, error),
+            should_run=lambda: generation == self.cache.generation,
+        )
 
     def _decode_bounds(self) -> tuple[int, int]:
         screens = QApplication.screens()
         if not screens:
             return screen_decode_bounds(
-                max(1, self.image_label.width()),
-                max(1, self.image_label.height()),
+                max(1, self.image_view.width()),
+                max(1, self.image_view.height()),
                 max(1.0, self.devicePixelRatioF()),
             )
         width = max(screen.geometry().width() for screen in screens)
@@ -827,6 +899,8 @@ class MainWindow(QMainWindow):
     def _decode_finished(
         self, path: Path, generation: int, result: object, error: Exception | None
     ) -> None:
+        if result is None and error is None:
+            return
         if self._closing or generation != self.cache.generation:
             return
         current = self.view.snapshot.current_name if self.view is not None else None
@@ -837,40 +911,67 @@ class MainWindow(QMainWindow):
         )
         if error is not None:
             if path == current_path:
-                self.image_label.setPixmap(QPixmap())
-                self.image_label.setText(_decode_message(error))
+                self.image_view.set_image(None)
+                self.image_view.set_message(_decode_message(error))
             return
         if isinstance(result, DecodedImage):
             self.cache.put(path, generation, result)
             if path == current_path:
                 self._show_decoded(result)
 
+    def _on_zoom_changed(self, scale: float) -> None:
+        if scale <= 1.5 or self.view is None or self.image_view.image is None:
+            return
+        snapshot = self.view.snapshot
+        current_name = snapshot.current_name
+        if current_name is None:
+            return
+        path = Path(snapshot.source_path) / current_name
+        generation = self.cache.generation
+        request = (path, generation)
+        if self._full_resolution_cache is not None and self._full_resolution_cache[0] == path:
+            self.image_view.set_full_resolution_image(
+                _qimage_from_decoded(self._full_resolution_cache[1])
+            )
+            return
+        if self._full_resolution_request == request:
+            return
+        self._full_resolution_request = request
+        decoder = self.runtime.decoder
+        max_width, max_height = full_resolution_decode_bounds()
+
+        def decode() -> DecodedImage:
+            decode_full_resolution = getattr(decoder, "decode_full_resolution", None)
+            if callable(decode_full_resolution):
+                return decode_full_resolution(path)
+            return decoder.decode(path, max_width, max_height)
+
+        self.workers.image_decoding.submit(
+            decode,
+            lambda result, error: self._full_resolution_decode_finished(
+                path, generation, result, error
+            ),
+            should_run=lambda: generation == self.cache.generation,
+        )
+
+    def _full_resolution_decode_finished(
+        self, path: Path, generation: int, result: object, error: Exception | None
+    ) -> None:
+        if error is not None or self._closing or generation != self.cache.generation:
+            return
+        current = self.view.snapshot.current_name if self.view is not None else None
+        current_path = (
+            Path(self.view.snapshot.source_path) / current
+            if self.view is not None and current is not None
+            else None
+        )
+        if path != current_path or not isinstance(result, DecodedImage):
+            return
+        self._full_resolution_cache = (path, result)
+        self.image_view.set_full_resolution_image(_qimage_from_decoded(result))
+
     def _show_decoded(self, image: DecodedImage) -> None:
-        pixel_format = (
-            QImage.Format.Format_RGBA8888 if image.has_alpha else QImage.Format.Format_RGB888
-        )
-        channels = 4 if image.has_alpha else 3
-        qimage = QImage(
-            image.data,
-            image.width,
-            image.height,
-            image.width * channels,
-            pixel_format,
-        ).copy()
-        pixmap = QPixmap.fromImage(qimage)
-        factor = min(
-            1.0,
-            self.image_label.width() / max(1, image.width),
-            self.image_label.height() / max(1, image.height),
-        )
-        scaled = pixmap.scaled(
-            max(1, round(image.width * factor)),
-            max(1, round(image.height * factor)),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.image_label.setText("")
-        self.image_label.setPixmap(scaled)
+        self.image_view.set_image(_qimage_from_decoded(image))
 
     def _slot_pressed(self, slot_index: int, image_name: str) -> None:
         if self._slot_operation_pending:
@@ -1170,6 +1271,10 @@ class MainWindow(QMainWindow):
             self._queue_navigation(direction)
             event.accept()
             return
+        if is_image_list_toggle_key(event):
+            self._toggle_image_list()
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_F1 and not event.modifiers():
             self._show_help()
             event.accept()
@@ -1178,7 +1283,25 @@ class MainWindow(QMainWindow):
             self._run_file(self.runtime.service.refresh)
             event.accept()
             return
+        if is_zoom_reset_event(event):
+            self.image_view.reset_zoom()
+            event.accept()
+            return
         event_data = keyboard_event_data(event)
+        zoom_factor = zoom_factor_from_event(event)
+        if (
+            zoom_factor is not None
+            and event_data.position is not None
+            and not event_data.auto_repeat
+            and self.view is not None
+        ):
+            for index, slot in enumerate(self.view.snapshot.profile.slots):
+                if slot.key_position == event_data.position:
+                    current_name = self.view.snapshot.current_name
+                    if current_name is not None:
+                        self._slot_pressed(index, current_name)
+                    event.accept()
+                    return
         if event_data.position is not None and event_data.triggers_slot:
             if self.runtime.settings_writable and self.view is not None:
                 labels = dict(self.view.settings.learned_key_labels)
@@ -1203,17 +1326,11 @@ class MainWindow(QMainWindow):
                         break
             event.accept()
             return
+        if zoom_factor is not None:
+            self.image_view.zoom_by(zoom_factor)
+            event.accept()
+            return
         super().keyPressEvent(event)
-
-    @override
-    def resizeEvent(self, event: QResizeEvent) -> None:
-        super().resizeEvent(event)
-        if self.view is not None and self.view.snapshot.current_name is not None:
-            snapshot = self.view.snapshot
-            path = Path(snapshot.source_path) / (snapshot.current_name or "")
-            image = self.cache.get(path)
-            if image is not None:
-                self._show_decoded(image)
 
     @override
     def closeEvent(self, event: QCloseEvent) -> None:
@@ -1237,6 +1354,18 @@ class MainWindow(QMainWindow):
         self._ready_to_close = True
         self.workers.shutdown()
         self.close()
+
+
+def _qimage_from_decoded(image: DecodedImage) -> QImage:
+    pixel_format = QImage.Format.Format_RGBA8888 if image.has_alpha else QImage.Format.Format_RGB888
+    channels = 4 if image.has_alpha else 3
+    return QImage(
+        image.data,
+        image.width,
+        image.height,
+        image.width * channels,
+        pixel_format,
+    ).copy()
 
 
 def _decode_message(error: Exception) -> str:

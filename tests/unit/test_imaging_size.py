@@ -1,11 +1,15 @@
 import pytest
 
-from vuechoixgarde.imaging.size import screen_decode_bounds
+from vuechoixgarde.imaging.size import full_resolution_decode_bounds, screen_decode_bounds
 
 
 def test_decode_bounds_include_device_pixel_ratio_without_upscaling_logic() -> None:
     assert screen_decode_bounds(1920, 1080, 2.0) == (3840, 2160)
     assert screen_decode_bounds(1920, 1080, 1.25) == (2400, 1350)
+
+
+def test_full_resolution_bounds_do_not_restrict_the_source_dimensions() -> None:
+    assert full_resolution_decode_bounds() == (2**31 - 1, 2**31 - 1)
 
 
 def test_decode_bounds_cap_largest_dimension_and_preserve_aspect_ratio() -> None:
